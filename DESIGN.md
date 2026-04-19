@@ -251,6 +251,149 @@ But once executor has claimed the task, the runtime model is the same:
 
 So the core executor state model should be reasoned about as "one claimed command", not as two disjoint task systems.
 
+## Task Lifecycle State Model
+
+The task lifecycle that matters most operationally is:
+
+1. submitter publishes one task document into `agent_forward/tasks/...`
+2. executor scans forward and checks backward
+3. executor writes one ACK into `agent_backward/acks/...`
+4. only after ACK becomes durable should executor treat the task as claimed
+5. executor runs the task
+6. executor writes one final result into `agent_backward/results/...`
+7. submitter returns only after it sees the final result, or after its own local wait times out
+
+Important consequence:
+
+- the submitter does **not** wait for ACK visibility as a user-facing milestone
+- the submitter waits only for the final result
+- ACK is an executor-side claim marker, not a caller-visible completion signal
+
+## Sequence: Current Task Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Submitter
+    participant F as agent_forward
+    participant B as agent_backward
+    participant E as Executor
+    participant P as Child process
+
+    S->>F: publish task json
+    S-->>S: print SUBMITTED
+
+    loop caller waits for final result only
+        S->>B: sync backward
+        alt result exists
+            B-->>S: final result
+            S-->>S: return stdout_tail / stderr_tail / exit_code
+        else no result yet
+            B-->>S: keep waiting or local timeout
+        end
+    end
+
+    E->>F: scan task buckets
+    E->>B: check result / ack
+    alt no result and no ack
+        E->>B: write ACK
+        E->>B: push ACK until durable
+        E->>P: start task only after ACK push succeeds
+        P-->>E: exit / timeout
+        E->>B: write final result
+        E->>B: push final result until durable
+    else ack exists or result exists
+        E-->>E: do not claim
+    end
+```
+
+State interpretation:
+
+- `forward task exists, no ack, no result` => published but not yet claimed
+- `ack exists, no result` => claimed / in progress / suspended after executor-side failure
+- `result exists` => terminal
+
+## Sequence: Current Executor Blocking Model
+
+This section is specifically about what the current `v0.0.7` implementation does.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Loop as Executor scan loop
+    participant F as forward clone
+    participant B as backward clone
+    participant P as One child process
+
+    Loop->>F: sync + scan
+    Loop->>B: check ack/result
+    Loop->>B: write ACK
+    Loop->>B: retry push forever until ACK is durable
+    Loop->>P: run one task
+    Note over Loop,P: current implementation blocks here
+    P-->>Loop: exit / timeout
+    Loop->>B: write final result
+    Loop->>B: retry push forever until result is durable
+    Loop-->>Loop: continue next scan
+```
+
+Current behavior:
+
+- after a task is claimed, the scan loop stays focused on that one task
+- if ACK push is blocked by network loss, the scan loop waits there
+- if the task process is still running, the scan loop waits there
+- if result push is blocked by network loss, the scan loop waits there
+
+So the current model is:
+
+- durable ACK first
+- then run exactly one task
+- then durable final result
+- only then continue scanning
+
+## Sequence: Current Output Visibility Model
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Child process
+    participant E as Executor
+    participant B as agent_backward
+    participant S as Submitter
+
+    P->>E: stdout / stderr during local execution
+    Note over E: current implementation captures output locally only
+    Note over B: no incremental output records are published
+    E->>B: write one final result with stdout_tail / stderr_tail
+
+    loop submitter poll
+        S->>B: poll results/**/*.json
+        alt final result visible
+            B-->>S: final stdout_tail / stderr_tail
+        else not visible yet
+            B-->>S: keep waiting
+        end
+    end
+```
+
+Current output semantics:
+
+- there is no protocol-level streaming output
+- there is no protocol-level incremental progress event
+- executor captures local child output and publishes only one final tail snapshot
+- submitter learns output by polling backward for the final result file
+
+## What Is Not Yet Implemented
+
+The following model is **not** what the current executor does today:
+
+- start many child tasks and put them into an in-memory active set
+- return immediately to scan more tasks
+- let later scan passes poll those active tasks
+- finalize them asynchronously when they exit
+
+That was closer to one branch of the old monolith design for tracked SSH tasks, but it is not the current behavior of this repository.
+
 ## Weak-Network / Intermittent Disconnect Model
 
 The system is designed for networks that may repeatedly disconnect or have long delays.
@@ -289,6 +432,9 @@ Behavior under disconnect:
 - if executor cannot push ACK, it must not proceed as if the task was durably claimed
 - if executor already wrote ACK but cannot later push result, the task remains `ack only`
 - because `ack only` is not auto-reclaimed, the task is suspended until manual repair
+- executor is expected to keep retrying sync / push forever with backoff rather than exiting on transient network loss
+- git reconnect is therefore part of the steady-state operating model, not an exceptional shutdown path
+- task subprocess timeout must be converted into one durable final result with `status=failed`, not an executor crash
 
 This is intentional:
 
@@ -307,30 +453,140 @@ Under very poor connectivity, the most likely visible symptoms are:
 
 The repair tools exist specifically for this regime.
 
-## Recommended Deployment Rule
+## Continuously-Running Executor Model
+
+The intended executor behavior is:
+
+- keep running forever
+- keep retrying git connectivity forever
+- re-establish connections when the network comes back
+- never stop the long-running loop just because one sync, push, or task timeout failed
+
+This means the acceptable externally visible failures are:
+
+- submitter-side local timeout
+- submitter-side publish failure before a task becomes durable
+
+And the unacceptable internal failures are:
+
+- executor process exit because of transient fetch/push failure
+- executor process exit because a task subprocess timed out
+
+## Working Clone Separation
 
 Use separate working clones for:
 
 - submitter
 - executor
 
-This matters even on the same machine.
+This is not just a recommendation. It is the supported operating model, including when both roles run on one machine.
 
 Reason:
 
 - if submitter and executor share one working clone, their git operations can interfere with each other
 - separate working clones against the same remotes are the expected operating model
 
+Conclusion:
+
+- same remotes: supported
+- same working clone: not supported
+
 The local bare-remote integration test in this repository uses this exact separation.
+
+## Sequence: Actual Git Operations On Repositories
+
+This sequence reflects the current implementation more literally than the earlier protocol diagrams.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Submitter Process
+    participant SF as Submitter forward clone
+    participant SB as Submitter backward clone
+    participant FO as forward remote
+    participant BO as backward remote
+    participant E as Executor Process
+    participant EF as Executor forward clone
+    participant EB as Executor backward clone
+
+    Note over S,E: Supported model = separate working clones, same remotes
+
+    S->>SF: fetch origin/main
+    S->>SF: checkout -B main origin/main
+    S->>SF: reset --hard origin/main
+    S->>SB: fetch origin/main
+    S->>SB: checkout -B main origin/main
+    S->>SB: reset --hard origin/main
+    S->>SF: write task file
+    S->>SF: git add + commit
+    S->>FO: git push
+
+    loop wait_for_result()
+        S->>SB: fetch origin/main
+        S->>SB: checkout -B main origin/main
+        S->>SB: reset --hard origin/main
+        S->>SB: read results/**/*.json
+    end
+
+    E->>EF: fetch origin/main
+    E->>EF: checkout -B main origin/main
+    E->>EF: reset --hard origin/main
+    E->>EB: fetch origin/main
+    E->>EB: checkout -B main origin/main
+    E->>EB: reset --hard origin/main
+    E->>EF: read tasks/**/*.json
+    E->>EB: check ack/result visibility
+    E->>EB: write ack file
+    E->>EB: git add + commit
+    E->>BO: git push
+    E->>E: run command
+    E->>EB: write result file
+    E->>EB: git add + commit
+    E->>BO: git push
+    Note over E: on transient git failure, retry forever with backoff
+    Note over E: on task timeout, write one failed result and continue loop
+```
+
+Key point:
+
+- submitter reads backward by first refreshing its local backward clone
+- executor reads forward/backward the same way
+- the safe concurrency boundary is the remote repository, not a shared local working tree
+
+## Sequence: Why One Shared Submodule Worktree Can Race
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Submitter Process
+    participant F as shared agent_forward worktree
+    participant B as shared agent_backward worktree
+    participant E as Executor Process
+
+    Note over S,E: Unsupported model = both processes use the same checked-out submodule worktrees
+
+    par submit path
+        S->>F: git_sync(forward)
+        S->>B: git_sync(backward)
+        S->>F: write task + add + commit + push
+    and executor scan
+        E->>F: git_sync(forward)
+        E->>B: git_sync(backward)
+        E->>B: write ack/result + add + commit + push
+    end
+
+    Note over F,B: Race is on one repo's HEAD / index / lockfiles / worktree state
+    Note over S,E: File-level non-overlap does not remove git-level interference
+```
 
 ## Fresh-Machine Startup Model
 
 For a new machine, especially a new Windows executor host, the expected path is:
 
 1. clone `AgentExecTunnel`
-2. ensure sibling repos exist:
-   - `../agent_forward`
-   - `../agent_backward`
+2. initialize the checked-out submodules:
+   - `agent_forward/`
+   - `agent_backward/`
 3. run:
    - `python3 tools/bootstrap_repos.py`
 4. start executor:
@@ -339,12 +595,13 @@ For a new machine, especially a new Windows executor host, the expected path is:
 Bootstrap is expected to verify:
 
 - tunnel repo exists
-- sibling forward/backward repos exist
-- submodules can initialize from relative URLs
+- repository-local forward/backward submodule working trees exist
+- submodules point at reachable origins
+- local file-based submodule origins can be repaired into repository-local bare remotes when needed
 
 Fresh-machine readiness therefore depends on:
 
-- correct sibling repo layout
+- correct submodule checkout layout
 - submodule reachability
 - a Python + git environment that can run the CLI scripts
 

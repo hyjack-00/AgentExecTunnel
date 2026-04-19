@@ -47,15 +47,82 @@ class Executor:
         self.settings = settings or default_settings()
         self.executor_id = executor_id or default_executor_id()
 
+    @staticmethod
+    def log(message: str) -> None:
+        print(message, flush=True)
+
+    def _retry_delay(self, retries: int) -> float:
+        return min(
+            self.settings.network_retry_backoff_seconds * retries,
+            self.settings.network_retry_max_backoff_seconds,
+        )
+
+    def _sync_repo_with_retry(self, repo_root: Path, label: str) -> None:
+        retries = 0
+        while True:
+            try:
+                git_sync(
+                    repo_root,
+                    timeout_seconds=self.settings.git_command_timeout_seconds,
+                )
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                retries += 1
+                delay = self._retry_delay(retries)
+                self.log(f"SYNC_RETRY repo={label} retries={retries} retry_in={delay}s error={exc}")
+                time.sleep(delay)
+
+    def _commit_push_with_retry(self, repo_root: Path, message: str, label: str) -> None:
+        retries = 0
+        while True:
+            try:
+                git_commit_push(
+                    repo_root,
+                    message,
+                    max_attempts=None,
+                    timeout_seconds=self.settings.git_command_timeout_seconds,
+                )
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                retries += 1
+                delay = self._retry_delay(retries)
+                self.log(
+                    f"COMMIT_RETRY repo={label} retries={retries} retry_in={delay}s "
+                    f"message={message!r} error={exc}"
+                )
+                time.sleep(delay)
+
     def startup_scan(self) -> ScanStats:
         return self.scan_recent(self.settings.startup_scan_hours)
+
+    def startup_scan_with_retry(self) -> ScanStats:
+        retries = 0
+        while True:
+            try:
+                return self.startup_scan()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                retries += 1
+                delay = self._retry_delay(retries)
+                self.log(f"STARTUP_RETRY retries={retries} retry_in={delay}s error={exc}")
+                time.sleep(delay)
+
+    def scan_recent_with_retry(self, hours: int | None = None) -> ScanStats:
+        retries = 0
+        while True:
+            try:
+                return self.scan_recent(hours=hours)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                retries += 1
+                delay = self._retry_delay(retries)
+                self.log(f"SCAN_RETRY retries={retries} retry_in={delay}s error={exc}")
+                time.sleep(delay)
 
     def scan_recent(self, hours: int | None = None) -> ScanStats:
         cfg = self.settings
         now = utc_now()
         buckets = iter_hour_buckets(now, hours or cfg.steady_scan_hours)
-        git_sync(cfg.forward_root)
-        git_sync(cfg.backward_root)
+        self._sync_repo_with_retry(cfg.forward_root, "forward")
+        self._sync_repo_with_retry(cfg.backward_root, "backward")
         scanned = 0
         claimed = 0
         skipped_result = 0
@@ -73,8 +140,11 @@ class Executor:
                 if ack_path is not None:
                     skipped_ack += 1
                     continue
-                self._claim_and_run(task)
-                claimed += 1
+                try:
+                    self._claim_and_run(task)
+                    claimed += 1
+                except Exception as exc:
+                    self.log(f"TASK_ERROR task_id={task_id} error={exc}")
         return ScanStats(scanned=scanned, claimed=claimed, skipped_result=skipped_result, skipped_ack=skipped_ack)
 
     def _claim_and_run(self, task: dict) -> None:
@@ -92,33 +162,50 @@ class Executor:
         )
         ack_rel = Path("acks") / Path(task["forward_task_path"]).relative_to("tasks")
         write_json(cfg.backward_root / ack_rel, ack.to_json())
-        git_commit_push(cfg.backward_root, f"ack task {task['task_id']}")
+        self._commit_push_with_retry(cfg.backward_root, f"ack task {task['task_id']}", "backward")
 
         started_at = utc_now()
-        proc = subprocess.run(
-            self._execution_command(task),
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=task["timeout_seconds"],
-        )
+        status = "failed"
+        stdout_tail = ""
+        stderr_tail = ""
+        exit_code = -1
+        try:
+            proc = subprocess.run(
+                self._execution_command(task),
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=task["timeout_seconds"],
+            )
+            status = "done" if proc.returncode == 0 else "failed"
+            stdout_tail = tail_text(proc.stdout)
+            stderr_tail = tail_text(proc.stderr)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout_tail = tail_text(exc.stdout or "")
+            timeout_note = f"task timed out after {task['timeout_seconds']}s"
+            stderr_text = exc.stderr or ""
+            stderr_tail = tail_text(f"{stderr_text}\n{timeout_note}" if stderr_text else timeout_note)
+            exit_code = 124
+        except Exception as exc:
+            stderr_tail = tail_text(str(exc))
         finished_at = utc_now()
         result = ResultRecord(
             task_id=task["task_id"],
             forward_task_path=task["forward_task_path"],
             executor_id=self.executor_id,
-            status="done" if proc.returncode == 0 else "failed",
+            status=status,
             started_at=iso_z(started_at),
             finished_at=iso_z(finished_at),
-            exit_code=proc.returncode,
-            stdout_tail=tail_text(proc.stdout),
-            stderr_tail=tail_text(proc.stderr),
+            exit_code=exit_code,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
             command_digest=digest,
         )
         result_rel = Path("results") / Path(task["forward_task_path"]).relative_to("tasks")
         write_json(cfg.backward_root / result_rel, result.to_json())
-        git_commit_push(cfg.backward_root, f"write result {task['task_id']}")
+        self._commit_push_with_retry(cfg.backward_root, f"write result {task['task_id']}", "backward")
 
     @staticmethod
     def _execution_command(task: dict) -> str:
@@ -130,7 +217,7 @@ class Executor:
         return task["command"]
 
     def run_loop(self, poll_interval_seconds: float = 1.0) -> None:
-        self.startup_scan()
+        self.startup_scan_with_retry()
         while True:
-            self.scan_recent()
+            self.scan_recent_with_retry()
             time.sleep(poll_interval_seconds)

@@ -35,17 +35,32 @@
 - [x] Add and keep local fake-relay roundtrip tests with multiple back-and-forth task cycles
 - [x] Add and keep a 30-second local burst stress path in the new architecture
 - [x] Actually run the 30-second local burst stress path and record the result
-- [ ] Add CLI tests around submitter / repair entrypoints
+- [x] Add a real submodule-backed burst runner so pressure runs can leave visible task/ack/result files under `agent_forward/` and `agent_backward/`
+- [x] Remove duplicate `tools/submit_files.py`; keep `submitter/submit_files.py` as the single file-upload entrypoint
+- [x] Add CLI tests around submitter / repair entrypoints
 - [ ] Add configurable SSH probe presets for availability
-- [ ] Review whether a single shared working clone is acceptable when submitter and executor run on one machine
-- [ ] 解释：为什么 submodule 目录仍使用 `forward/` 和 `backward/`，以及是否值得改成 `agent_forward/` / `agent_backward/`
+- [x] Review whether a single shared working clone is acceptable when submitter and executor run on one machine
+- [x] Rename submodule working directories to `agent_forward/` and `agent_backward/` and align docs with the sibling repo names
+- [x] Switch `.gitmodules` to explicit GitHub HTTPS URLs
+- [x] Change default runtime roots to repository-local submodule paths
+- [x] Add repo-operation sequence diagrams explaining supported separate clones vs unsupported shared worktrees
+- [x] Make bootstrap repair local file-based submodule origins into repo-local bare remotes
+- [x] Restore legacy-style infinite retry / backoff for executor git sync and push paths
+- [x] Keep executor scan loop alive across transient git/network failures
+- [x] Convert executor command timeout into durable failed result instead of process crash
+- [x] Document the continuously-running executor model in `DESIGN.md`
+- [x] Clarify the actual task lifecycle: durable ACK first, then one blocking task execution, then durable final result
+- [x] Clarify that current output visibility is final-result polling, not protocol-level streaming
+- [ ] If desired later: reintroduce active-process async monitoring for long tasks instead of the current one-task blocking model
+
 
 ## Notes
 
 - Version line is restarted from `v0.0.1` because this is a new architecture.
 - ACK is retained and is the executor-side claim marker.
-- `stale` is removed from protocol.
-- Availability has been migrated into the new repository layout.
 - Real local integration is currently covered with separate submitter/executor working clones against the same bare remotes.
-- Submit interfaces are now exposed under `submitter/` with the legacy PowerShell/Git Bash naming pattern.
 - The current 30-second local burst diagnostic passed with `30/30` completed tasks using separate submitter clones and a fake relay ssh shim.
+- Same remotes are supported; a shared submitter/executor working clone is not the supported deployment model.
+- `.gitmodules` now declares explicit HTTPS origins for both data submodules.
+- Executor now follows the intended long-running model: transient git/network failures are retried with backoff and task timeout is finalized as one durable failed result.
+- Current executor is still single-task blocking after claim; it does not yet maintain an active in-memory async task set.

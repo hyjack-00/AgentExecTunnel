@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+def run_git(repo_root: Path, args: list[str], timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=repo_root,
@@ -16,13 +16,14 @@ def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
     )
 
 
-def git_sync(repo_root: Path, branch: str = "main") -> None:
-    run_git(repo_root, ["fetch", "origin", branch])
-    run_git(repo_root, ["checkout", "-B", branch, f"origin/{branch}"])
-    run_git(repo_root, ["reset", "--hard", f"origin/{branch}"])
+def git_sync(repo_root: Path, branch: str = "main", timeout_seconds: float | None = None) -> None:
+    run_git(repo_root, ["fetch", "origin", branch], timeout_seconds=timeout_seconds)
+    run_git(repo_root, ["checkout", "-B", branch, f"origin/{branch}"], timeout_seconds=timeout_seconds)
+    run_git(repo_root, ["reset", "--hard", f"origin/{branch}"], timeout_seconds=timeout_seconds)
 
 
 def _maybe_abort_rebase(repo_root: Path) -> None:
@@ -36,8 +37,27 @@ def _maybe_abort_rebase(repo_root: Path) -> None:
     )
 
 
-def git_commit_push(repo_root: Path, message: str, branch: str = "main", max_attempts: int = 64) -> None:
-    run_git(repo_root, ["add", "-A"])
+def _has_local_commits(repo_root: Path, branch: str = "main", timeout_seconds: float | None = None) -> bool:
+    proc = run_git(
+        repo_root,
+        ["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"],
+        timeout_seconds=timeout_seconds,
+    )
+    ahead_behind = proc.stdout.strip().split()
+    if len(ahead_behind) != 2:
+        return False
+    ahead = int(ahead_behind[0])
+    return ahead > 0
+
+
+def git_commit_push(
+    repo_root: Path,
+    message: str,
+    branch: str = "main",
+    max_attempts: int | None = 64,
+    timeout_seconds: float | None = None,
+) -> None:
+    run_git(repo_root, ["add", "-A"], timeout_seconds=timeout_seconds)
     status = subprocess.run(
         ["git", "status", "--short"],
         cwd=repo_root,
@@ -45,22 +65,26 @@ def git_commit_push(repo_root: Path, message: str, branch: str = "main", max_att
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
     )
-    if not status.stdout.strip():
+    if status.stdout.strip():
+        run_git(repo_root, ["commit", "-m", message], timeout_seconds=timeout_seconds)
+    elif not _has_local_commits(repo_root, branch=branch, timeout_seconds=timeout_seconds):
         return
-    run_git(repo_root, ["commit", "-m", message])
     last_error: subprocess.CalledProcessError | None = None
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while max_attempts is None or attempt < max_attempts:
+        attempt += 1
         try:
-            run_git(repo_root, ["push", "origin", branch])
+            run_git(repo_root, ["push", "origin", branch], timeout_seconds=timeout_seconds)
             return
         except subprocess.CalledProcessError as exc:
             last_error = exc
-            if attempt == max_attempts:
+            if max_attempts is not None and attempt == max_attempts:
                 break
-            run_git(repo_root, ["fetch", "origin", branch])
+            run_git(repo_root, ["fetch", "origin", branch], timeout_seconds=timeout_seconds)
             try:
-                run_git(repo_root, ["rebase", f"origin/{branch}"])
+                run_git(repo_root, ["rebase", f"origin/{branch}"], timeout_seconds=timeout_seconds)
             except subprocess.CalledProcessError:
                 _maybe_abort_rebase(repo_root)
                 raise

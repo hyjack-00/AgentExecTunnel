@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.runtime_helpers import init_bare_and_clone, run, seed_backward_repo, seed_forward_repo
+from tests.runtime_helpers import run
 
 
 class FreshCloneTests(unittest.TestCase):
@@ -16,10 +16,14 @@ class FreshCloneTests(unittest.TestCase):
             run(["git", "init", "--bare", "--initial-branch=main", str(tunnel_origin)])
             run(["git", "push", str(tunnel_origin), "main"], cwd=Path("/workspace/AgentExecTunnel"))
 
-            _forward_bare, forward_work = init_bare_and_clone(root, "agent_forward")
-            _backward_bare, backward_work = init_bare_and_clone(root, "agent_backward")
-            seed_forward_repo(forward_work)
-            seed_backward_repo(backward_work)
+            forward_origin = root / "agent_forward.git"
+            backward_origin = root / "agent_backward.git"
+            run(["git", "init", "--bare", "--initial-branch=main", str(forward_origin)])
+            run(["git", "init", "--bare", "--initial-branch=main", str(backward_origin)])
+            run(["git", "push", str(forward_origin), "main"], cwd=Path("/workspace/AgentExecTunnel/agent_forward"))
+            run(["git", "push", str(backward_origin), "main"], cwd=Path("/workspace/AgentExecTunnel/agent_backward"))
+            run(["git", "clone", str(forward_origin), str(root / "agent_forward")])
+            run(["git", "clone", str(backward_origin), str(root / "agent_backward")])
 
             fresh_tunnel = root / "AgentExecTunnel"
             run(["git", "clone", str(tunnel_origin), str(fresh_tunnel)])
