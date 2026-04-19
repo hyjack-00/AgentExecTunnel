@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.0.1"
+PACKAGE_VERSION = "v0.0.2"
 
 
 @dataclass(frozen=True)

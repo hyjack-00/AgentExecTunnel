@@ -15,13 +15,20 @@
 - [x] Add initial unit tests
 - [x] Add `reviews/v0.0.1.md`
 - [x] Add `evaluations/v0.0.1.md`
-- [ ] Migrate availability suite into the new repository layout
-- [ ] Add broader local integration coverage against real local repos/remotes
+- [x] Migrate availability suite into the new repository layout
+- [x] Add broader local integration coverage against real local repos/remotes
 - [x] Run review/evaluation and release `v0.0.1`
+
+## Next Todo
+
+- [ ] Add CLI tests around submitter / repair entrypoints
+- [ ] Add configurable SSH probe presets for availability
+- [ ] Review whether a single shared working clone is acceptable when submitter and executor run on one machine
 
 ## Notes
 
 - Version line is restarted from `v0.0.1` because this is a new architecture.
 - ACK is retained and is the executor-side claim marker.
 - `stale` is removed from protocol.
-- Availability remains part of the target repository layout, but the first cut only carries the core protocol code and tests.
+- Availability has been migrated into the new repository layout.
+- Real local integration is currently covered with separate submitter/executor working clones against the same bare remotes.

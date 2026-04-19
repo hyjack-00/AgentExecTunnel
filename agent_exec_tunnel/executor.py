@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import time
@@ -95,7 +96,7 @@ class Executor:
 
         started_at = utc_now()
         proc = subprocess.run(
-            task["command"],
+            self._execution_command(task),
             shell=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -118,6 +119,15 @@ class Executor:
         result_rel = Path("results") / Path(task["forward_task_path"]).relative_to("tasks")
         write_json(cfg.backward_root / result_rel, result.to_json())
         git_commit_push(cfg.backward_root, f"write result {task['task_id']}")
+
+    @staticmethod
+    def _execution_command(task: dict) -> str:
+        if task["submit_mode"] == "ssh":
+            host = task.get("target_host")
+            if not host:
+                raise RuntimeError(f"ssh task missing target_host task_id={task['task_id']}")
+            return f"ssh {shlex.quote(host)} {shlex.quote(task['command'])}"
+        return task["command"]
 
     def run_loop(self, poll_interval_seconds: float = 1.0) -> None:
         self.startup_scan()

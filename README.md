@@ -31,6 +31,8 @@ Current architecture version starts from `v0.0.1`.
 - `python3 tools/submit_files.py --name demo --src /path/to/file-or-dir`
 - `python3 executor/run_executor.py`
 - `python3 tools/repair_task.py --task-id ... --clear-ack`
+- `python3 tests/availability/probe.py --probe-id relay_echo --count 1`
+- `python3 tests/availability/report.py --serve`
 
 ## Process
 
@@ -42,3 +44,17 @@ Every version requires:
 - `reviews/vX.Y.Z.md`
 - `evaluations/vX.Y.Z.md`
 - test/evaluation run
+
+## Availability
+
+Availability monitoring now lives in `tests/availability/`.
+
+- `probe.py` records probe results into `var/availability/data-YYYYMMDD.jsonl`
+- `report.py` builds `var/availability/reports/report-latest.html`
+
+The current availability data model reports:
+
+- ACK latency
+- execution latency
+- result latency
+- total latency
