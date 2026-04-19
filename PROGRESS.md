@@ -21,6 +21,8 @@
 
 ## Next Todo
 
+- [x] Restore submit-layer interfaces matching legacy agent_forward entrypoints
+- [x] Add submit interface compatibility tests against legacy render/preview shape
 - [ ] Add CLI tests around submitter / repair entrypoints
 - [ ] Add configurable SSH probe presets for availability
 - [ ] Review whether a single shared working clone is acceptable when submitter and executor run on one machine
@@ -32,3 +34,4 @@
 - `stale` is removed from protocol.
 - Availability has been migrated into the new repository layout.
 - Real local integration is currently covered with separate submitter/executor working clones against the same bare remotes.
+- Submit interfaces are now exposed under `submitter/` with the legacy PowerShell/Git Bash naming pattern.

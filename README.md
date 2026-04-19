@@ -27,8 +27,11 @@ Current architecture version starts from `v0.0.1`.
 ## Main tools
 
 - `python3 tools/bootstrap_repos.py`
-- `python3 submitter/submit_task.py --command 'echo hello'`
-- `python3 tools/submit_files.py --name demo --src /path/to/file-or-dir`
+- `python3 submitter/submit_powershell.py 'echo hello'`
+- `python3 submitter/submit_powershell_ssh.py H20 'uname -a'`
+- `python3 submitter/submit_gitbash.py 'ls /c/Users/'`
+- `python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'`
+- `python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir`
 - `python3 executor/run_executor.py`
 - `python3 tools/repair_task.py --task-id ... --clear-ack`
 - `python3 tests/availability/probe.py --probe-id relay_echo --count 1`
