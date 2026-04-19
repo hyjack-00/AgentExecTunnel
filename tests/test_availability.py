@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from tests.availability import probe as availability_probe
 from tests.availability.report import build_report
 from tests.availability.storage import append_record, iter_records
 
@@ -35,3 +38,18 @@ class AvailabilityTests(unittest.TestCase):
         )
         self.assertIn("mean ack latency", html)
         self.assertIn("relay_echo", html)
+
+    def test_probe_cli_accepts_ssh_host_override(self) -> None:
+        with mock.patch.object(sys, "argv", ["probe.py", "--probe-id", "ssh_echo", "--ssh-host", "950"]):
+            args = availability_probe.parse_args()
+        self.assertEqual(args.probe_id, "ssh_echo")
+        self.assertEqual(args.ssh_host, "950")
+
+    def test_run_once_records_overridden_ssh_host(self) -> None:
+        args = mock.Mock(probe_id="ssh_echo", ssh_host="950")
+        fake_result = mock.Mock(task_id="task-1", payload={"status": "done", "started_at": "2026-04-19T00:00:00Z", "finished_at": "2026-04-19T00:00:01Z"})
+        with mock.patch("tests.availability.probe.default_settings"), \
+             mock.patch("tests.availability.probe.submit_task", return_value=fake_result), \
+             mock.patch("tests.availability.probe.read_ack_payload", return_value=None):
+            record = availability_probe.run_once(args)
+        self.assertEqual(record["target_host"], "950")

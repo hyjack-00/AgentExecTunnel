@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", default="var/availability")
     parser.add_argument("--mode", default="manual")
     parser.add_argument("--probe-id", default="relay_echo", choices=sorted(DEFAULT_PROBES))
+    parser.add_argument("--ssh-host", help="override target host for ssh probe presets")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--mean-period", type=float, default=300.0)
     parser.add_argument("--report-interval", type=float, default=300.0)
@@ -41,13 +42,14 @@ def read_ack_payload(task_id: str, backward_root: Path) -> dict | None:
 def run_once(args: argparse.Namespace) -> dict:
     settings = default_settings()
     spec = DEFAULT_PROBES[args.probe_id]
+    target_host = args.ssh_host if spec.submit_mode == "ssh" and args.ssh_host else spec.target_host
     started = time.monotonic()
     started_at = utc_now()
     try:
         result = submit_task(
             command=spec.command,
             submit_mode=spec.submit_mode,
-            target_host=spec.target_host,
+            target_host=target_host,
             timeout_seconds=settings.default_timeout_seconds,
             result_timeout_seconds=settings.default_timeout_seconds,
         )
@@ -75,6 +77,7 @@ def run_once(args: argparse.Namespace) -> dict:
         record = {
             "ts_utc": started_at.strftime("%Y-%m-%d %H:%M:%S"),
             "probe_id": spec.probe_id,
+            "target_host": target_host,
             "task_id": result.task_id,
             "outcome": "ok",
             "status": payload["status"],
@@ -88,6 +91,7 @@ def run_once(args: argparse.Namespace) -> dict:
         return {
             "ts_utc": started_at.strftime("%Y-%m-%d %H:%M:%S"),
             "probe_id": spec.probe_id,
+            "target_host": target_host,
             "task_id": "",
             "outcome": "error",
             "error": str(exc),
