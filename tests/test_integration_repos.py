@@ -96,11 +96,13 @@ class IntegrationReposTests(unittest.TestCase):
 
             deadline = time.time() + 10
             while time.time() < deadline:
-                if list(forward_submit.glob("tasks/**/*.json")):
+                run(["git", "fetch", "origin", "main"], cwd=forward_exec)
+                run(["git", "checkout", "-B", "main", "origin/main"], cwd=forward_exec)
+                if list(forward_exec.glob("tasks/**/*.json")):
                     break
                 time.sleep(0.05)
             else:
-                self.fail("task did not appear in forward repo")
+                self.fail("task did not appear in executor forward clone")
 
             stats = Executor(settings=executor_settings, executor_id="exec-local").scan_recent()
             self.assertEqual(stats.claimed, 1)

@@ -23,11 +23,7 @@ def default_submitter_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-def forward_task_count(settings: Settings) -> int:
-    return sum(1 for _ in settings.forward_root.glob("tasks/**/*.json"))
-
-
-def submit_task(
+def publish_task(
     command: str,
     submit_mode: str,
     target_host: str | None = None,
@@ -35,14 +31,10 @@ def submit_task(
     metadata: dict | None = None,
     settings: Settings | None = None,
     submitter_id: str | None = None,
-    poll_interval_seconds: float | None = None,
-    result_timeout_seconds: int | None = None,
-) -> SubmitResult:
+) -> tuple[str, str]:
     cfg = settings or default_settings()
     git_sync(cfg.forward_root)
     git_sync(cfg.backward_root)
-    if forward_task_count(cfg) >= cfg.task_window_limit:
-        raise RuntimeError("forward task window is full; retry later")
 
     now = utc_now()
     task_id = new_task_id(now)
@@ -62,8 +54,17 @@ def submit_task(
     write_json(path, task.to_json())
     git_commit_push(cfg.forward_root, f"submit task {task_id}")
     print(f"SUBMITTED task_id={task_id} forward_task_path={rel}")
+    return task_id, rel
 
-    deadline = time.monotonic() + float(result_timeout_seconds or (timeout_seconds or cfg.default_timeout_seconds))
+
+def wait_for_result(
+    task_id: str,
+    settings: Settings | None = None,
+    poll_interval_seconds: float | None = None,
+    result_timeout_seconds: int | None = None,
+) -> SubmitResult:
+    cfg = settings or default_settings()
+    deadline = time.monotonic() + float(result_timeout_seconds or cfg.default_timeout_seconds)
     sleep_s = poll_interval_seconds or cfg.submit_poll_interval_seconds
     while time.monotonic() < deadline:
         git_sync(cfg.backward_root)
@@ -73,3 +74,32 @@ def submit_task(
                 return SubmitResult(task_id=task_id, result_path=result, payload=payload)
         time.sleep(sleep_s)
     raise TimeoutError(f"timeout waiting for final result task_id={task_id}")
+
+
+def submit_task(
+    command: str,
+    submit_mode: str,
+    target_host: str | None = None,
+    timeout_seconds: int | None = None,
+    metadata: dict | None = None,
+    settings: Settings | None = None,
+    submitter_id: str | None = None,
+    poll_interval_seconds: float | None = None,
+    result_timeout_seconds: int | None = None,
+) -> SubmitResult:
+    cfg = settings or default_settings()
+    task_id, _rel = publish_task(
+        command=command,
+        submit_mode=submit_mode,
+        target_host=target_host,
+        timeout_seconds=timeout_seconds,
+        metadata=metadata,
+        settings=cfg,
+        submitter_id=submitter_id,
+    )
+    return wait_for_result(
+        task_id=task_id,
+        settings=cfg,
+        poll_interval_seconds=poll_interval_seconds,
+        result_timeout_seconds=result_timeout_seconds or timeout_seconds,
+    )

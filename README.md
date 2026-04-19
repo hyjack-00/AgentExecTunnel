@@ -15,7 +15,7 @@ Protocol roles:
 
 Authoritative task state is always in `agent_backward`.
 
-Current architecture version starts from `v0.0.1`.
+The architecture allows multiple submitters to publish into forward concurrently. Forward publication therefore must converge through git fetch/rebase/push retry rather than a single-submit assumption.
 
 ## Repositories
 
@@ -61,3 +61,20 @@ The current availability data model reports:
 - execution latency
 - result latency
 - total latency
+
+## Synchronization
+
+Even though forward and backward are single-purpose data repositories, synchronization is still part of correctness:
+
+- submitter must sync forward and backward before publication
+- submitter must sync backward before trusting final result visibility
+- executor must sync forward and backward before deciding whether a task is claimable
+- backward is the only authority for terminal state
+
+Relay and ssh are different submit wrappers, but they are the same runtime class of work for executor: one claimed task becomes one executed command.
+
+## Skill
+
+The repository-local Codex skill for the new architecture is:
+
+- [.codex/skills/agent-exec-tunnel-submit/SKILL.md](.codex/skills/agent-exec-tunnel-submit/SKILL.md)

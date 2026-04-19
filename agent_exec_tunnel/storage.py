@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +21,22 @@ def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str
 
 def git_sync(repo_root: Path, branch: str = "main") -> None:
     run_git(repo_root, ["fetch", "origin", branch])
-    run_git(repo_root, ["checkout", branch])
+    run_git(repo_root, ["checkout", "-B", branch, f"origin/{branch}"])
     run_git(repo_root, ["reset", "--hard", f"origin/{branch}"])
 
 
-def git_commit_push(repo_root: Path, message: str, branch: str = "main") -> None:
+def _maybe_abort_rebase(repo_root: Path) -> None:
+    subprocess.run(
+        ["git", "rebase", "--abort"],
+        cwd=repo_root,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def git_commit_push(repo_root: Path, message: str, branch: str = "main", max_attempts: int = 64) -> None:
     run_git(repo_root, ["add", "-A"])
     status = subprocess.run(
         ["git", "status", "--short"],
@@ -37,7 +49,24 @@ def git_commit_push(repo_root: Path, message: str, branch: str = "main") -> None
     if not status.stdout.strip():
         return
     run_git(repo_root, ["commit", "-m", message])
-    run_git(repo_root, ["push", "origin", branch])
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            run_git(repo_root, ["push", "origin", branch])
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt == max_attempts:
+                break
+            run_git(repo_root, ["fetch", "origin", branch])
+            try:
+                run_git(repo_root, ["rebase", f"origin/{branch}"])
+            except subprocess.CalledProcessError:
+                _maybe_abort_rebase(repo_root)
+                raise
+            time.sleep(min(0.02 * attempt, 0.5))
+    assert last_error is not None
+    raise last_error
 
 
 def read_json(path: Path) -> dict[str, Any]:

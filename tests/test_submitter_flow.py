@@ -1,26 +1,43 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from agent_exec_tunnel.config import Settings
-from agent_exec_tunnel.submitter import submit_task
-from agent_exec_tunnel.storage import write_json
+from agent_exec_tunnel.submitter import publish_task
+from tests.runtime_helpers import clone_pair, init_bare_and_clone, make_settings, seed_backward_repo, seed_forward_repo
 
 
 class SubmitterFlowTests(unittest.TestCase):
-    def test_submitter_rejects_full_forward_window(self) -> None:
+    def test_multiple_submitters_can_publish_without_forward_window_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            forward = root / "forward"
-            backward = root / "backward"
-            forward.mkdir()
-            backward.mkdir()
-            for idx in range(10):
-                write_json(forward / "tasks" / "2026" / "04" / "19" / "00" / f"{idx}.json", {"task_id": str(idx)})
-            settings = Settings(workspace_root=root, tunnel_root=root, forward_root=forward, backward_root=backward)
-            with mock.patch("agent_exec_tunnel.submitter.git_sync"):
-                with self.assertRaisesRegex(RuntimeError, "forward task window is full"):
-                    submit_task("echo hi", "relay", settings=settings)
+            forward_bare, forward_seed = init_bare_and_clone(root, "forward_seed")
+            backward_bare, backward_seed = init_bare_and_clone(root, "backward_seed")
+            seed_forward_repo(forward_seed)
+            seed_backward_repo(backward_seed)
+
+            holder: dict[str, tuple[str, str]] = {}
+
+            def start(idx: int) -> threading.Thread:
+                submit_forward, submit_backward = clone_pair(root, forward_bare, backward_bare, f"submit{idx}")
+                settings = make_settings(root, submit_forward, submit_backward)
+
+                def worker() -> None:
+                    holder[str(idx)] = publish_task(
+                        command=f"python3 -c \"print('submit-{idx}')\"",
+                        submit_mode="relay",
+                        settings=settings,
+                    )
+
+                thread = threading.Thread(target=worker, daemon=True)
+                thread.start()
+                return thread
+
+            threads = [start(idx) for idx in range(12)]
+            for thread in threads:
+                thread.join(timeout=30)
+                self.assertFalse(thread.is_alive())
+
+            self.assertEqual(len(holder), 12)

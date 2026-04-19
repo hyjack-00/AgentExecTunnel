@@ -1,6 +1,6 @@
 [submodule "forward"]
 	path = forward
-	url = /workspace/agent_forward
+	url = ../agent_forward
 [submodule "backward"]
 	path = backward
-	url = /workspace/agent_backward
+	url = ../agent_backward
