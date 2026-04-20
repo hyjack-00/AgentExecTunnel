@@ -126,6 +126,16 @@ class CliEntrypointTests(unittest.TestCase):
                 str(new_bare),
             )
 
+    def test_bootstrap_ensure_repo_rejects_non_empty_non_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            target = tmp_root / "agent_forward"
+            target.mkdir()
+            (target / "stranger.txt").write_text("hi\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                bootstrap_repos.ensure_repo(target, "https://example.invalid/repo.git", "main")
+            self.assertIn("not a git repo", str(ctx.exception))
+
     def test_repo_local_data_repos_do_not_ignore_runtime_paths(self) -> None:
         forward_check = subprocess.run(
             ["git", "check-ignore", "tasks/2026/04/19/16/task.json"],

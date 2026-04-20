@@ -63,11 +63,13 @@
 - [x] Inline DESIGN.md sequence diagrams next to the sections they illustrate
 - [x] Remove stale `.gitmodules` reference from `tools/run_burst_local_relay.py` argparse description
 - [x] Let burst `attach_repo_clones` accept a branch parameter so it can honor `AET_DATA_BRANCH` once callers propagate it
-- [ ] Propagate `branch` from `load_remote_urls()` down to `attach_repo_clones` calls in both burst runners
-- [ ] Add executor preflight check that fails fast with a "run bootstrap first" hint when `agent_forward/` or `agent_backward/` is missing
-- [ ] Bubble up git stderr in `tools/bootstrap_repos.py` so auth / network failures surface a readable error instead of a raw `CalledProcessError` traceback
-- [ ] Add unit coverage for `ensure_repo` rejecting a non-empty non-git target directory
-- [ ] Document a cleanup path for legacy machines with `.git/modules/agent_forward` / `.git/modules/agent_backward` left over from the removed submodule layout
+- [x] Propagate `branch` from `load_remote_urls()` down to `attach_repo_clones` calls in both burst runners
+- [x] Add executor preflight check that fails fast with a "run bootstrap first" hint when `agent_forward/` or `agent_backward/` is missing
+- [x] Bubble up git stderr in `tools/bootstrap_repos.py` so auth / network failures surface a readable error instead of a raw `CalledProcessError` traceback
+- [x] Add unit coverage for `ensure_repo` rejecting a non-empty non-git target directory
+- [x] Document a cleanup path for legacy machines with `.git/modules/agent_forward` / `.git/modules/agent_backward` left over from the removed submodule layout
+- [x] Make `scan` log print `claimed` / `skipped_ack` / `skipped_result` breakdown instead of the misleading `pending=N` that hides pre-ACK'd tasks
+- [ ] Decide whether `ack-only` tasks (ACK durable, no result, prior executor crashed) should be auto-reclaimed on startup; today `_recover_from_backward` freezes them into `blocked_tasks`
 
 
 ## Notes

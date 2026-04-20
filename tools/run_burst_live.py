@@ -129,10 +129,10 @@ def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: 
         run(["git", "config", "user.name", "agent"], cwd=repo)
 
 
-def load_remote_urls() -> tuple[str, str]:
+def load_remote_urls() -> tuple[str, str, str]:
     from agent_exec_tunnel.remotes import load_remotes
     remotes = load_remotes(ROOT)
-    return remotes.forward_url, remotes.backward_url
+    return remotes.forward_url, remotes.backward_url, remotes.branch
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,7 +156,7 @@ def main() -> None:
     args = parse_args()
     schedule = build_schedule(args.tasks, args.duration_seconds, args.seed, args.mode_set)
     out_dir = make_output_dir()
-    forward_remote, backward_remote = load_remote_urls()
+    forward_remote, backward_remote, data_branch = load_remote_urls()
 
     print("starting live burst", flush=True)
     print(f"repo_root={ROOT}", flush=True)
@@ -173,6 +173,7 @@ def main() -> None:
     print(f"drain_seconds={args.drain_seconds}", flush=True)
     print(f"forward_remote={forward_remote}", flush=True)
     print(f"backward_remote={backward_remote}", flush=True)
+    print(f"data_branch={data_branch}", flush=True)
     print("assumption=remote executor already running", flush=True)
 
     launched: list[dict] = []
@@ -180,7 +181,7 @@ def main() -> None:
         temp_root = Path(tmp)
         submitter_base = temp_root / "submitter_base"
         copy_tunnel_tree(ROOT, submitter_base)
-        attach_repo_clones(submitter_base, forward_remote, backward_remote)
+        attach_repo_clones(submitter_base, forward_remote, backward_remote, data_branch)
 
         start = time.monotonic()
         next_index = 0

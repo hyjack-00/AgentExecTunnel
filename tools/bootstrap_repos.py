@@ -18,6 +18,14 @@ def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[
     return subprocess.run(cmd, cwd=cwd, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def format_called_process_error(exc: subprocess.CalledProcessError) -> str:
+    stderr = (exc.stderr or "").strip()
+    stdout = (exc.stdout or "").strip()
+    details = stderr or stdout or f"exit={exc.returncode}"
+    cmd_text = " ".join(str(part) for part in exc.cmd) if isinstance(exc.cmd, (list, tuple)) else str(exc.cmd)
+    return f"git command failed: {cmd_text}\n{details}"
+
+
 def git_output(repo: Path, *args: str) -> str:
     return run(["git", *args], cwd=repo).stdout.strip()
 
@@ -82,8 +90,11 @@ def main() -> None:
     backward_url = args.backward_url or remotes.backward_url
     branch = args.branch or remotes.branch
 
-    forward_status = ensure_repo(settings.forward_root, forward_url, branch)
-    backward_status = ensure_repo(settings.backward_root, backward_url, branch)
+    try:
+        forward_status = ensure_repo(settings.forward_root, forward_url, branch)
+        backward_status = ensure_repo(settings.backward_root, backward_url, branch)
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(format_called_process_error(exc)) from exc
 
     print("bootstrap ok")
     print(f"tunnel={settings.tunnel_root}")

@@ -89,6 +89,19 @@ Always needed, even on updates:
 
 Submodule pinning is wrong for these two repos: they mutate on **every** task (new commits for task publication, ACK, result), so the tunnel commit would constantly need to bump its submodule SHA, and any runtime commit that was not pushed to the configured remote would produce `not our ref` errors on a new machine. Treating them as ignored sibling clones removes the whole class of ghost-SHA failures.
 
+### Migrating from the old submodule layout
+
+If the local checkout predates the submodule removal, git may keep stale module metadata around even after `tools/bootstrap_repos.py` succeeds. Clean it up manually once:
+
+```bash
+git submodule deinit -f agent_forward agent_backward    # no-op if already gone
+rm -rf .git/modules/agent_forward .git/modules/agent_backward
+rm -rf agent_forward agent_backward                     # only if the working dirs are still submodule checkouts
+python3 tools/bootstrap_repos.py                        # re-provision as plain sibling clones
+```
+
+After that the tunnel checkout holds `agent_forward/` and `agent_backward/` as gitignored plain clones; `.gitmodules` should not exist and `.git/modules/` should no longer contain either data-repo entry.
+
 ## Process
 
 All work is tracked in [PROGRESS.md](PROGRESS.md).

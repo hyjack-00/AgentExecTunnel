@@ -103,10 +103,10 @@ def sync_repo_to_remote_url(repo: Path, remote_url: str, branch: str = "main") -
     run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo)
 
 
-def load_remote_urls() -> tuple[str, str]:
+def load_remote_urls() -> tuple[str, str, str]:
     from agent_exec_tunnel.remotes import load_remotes
     remotes = load_remotes(ROOT)
-    return remotes.forward_url, remotes.backward_url
+    return remotes.forward_url, remotes.backward_url, remotes.branch
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,7 +140,7 @@ def main() -> None:
         if not (sub_forward / ".git").exists() or not (sub_backward / ".git").exists():
             raise SystemExit("agent_forward/ and agent_backward/ not found; run python3 tools/bootstrap_repos.py first")
 
-        forward_remote, backward_remote = load_remote_urls()
+        forward_remote, backward_remote, data_branch = load_remote_urls()
 
         print("starting local relay burst via two isolated tunnel repos", flush=True)
         print(f"repo_root={ROOT}", flush=True)
@@ -154,9 +154,10 @@ def main() -> None:
         print(f"gitbash_executable={args.gitbash_executable}", flush=True)
         print(f"forward_remote={forward_remote}", flush=True)
         print(f"backward_remote={backward_remote}", flush=True)
+        print(f"data_branch={data_branch}", flush=True)
 
-        sync_repo_to_remote_url(sub_forward, forward_remote)
-        sync_repo_to_remote_url(sub_backward, backward_remote)
+        sync_repo_to_remote_url(sub_forward, forward_remote, data_branch)
+        sync_repo_to_remote_url(sub_backward, backward_remote, data_branch)
 
         rows: list[dict] = []
         rows_lock = threading.Lock()
@@ -168,8 +169,8 @@ def main() -> None:
             submitter_base = temp_root / "submitter_base"
             copy_tunnel_tree(ROOT, executor_tunnel)
             copy_tunnel_tree(ROOT, submitter_base)
-            attach_repo_clones(executor_tunnel, forward_remote, backward_remote)
-            attach_repo_clones(submitter_base, forward_remote, backward_remote)
+            attach_repo_clones(executor_tunnel, forward_remote, backward_remote, data_branch)
+            attach_repo_clones(submitter_base, forward_remote, backward_remote, data_branch)
 
             executor_stdout_path = out_dir / "executor.stdout.log"
             executor_stderr_path = out_dir / "executor.stderr.log"
@@ -274,8 +275,8 @@ def main() -> None:
                     executor_proc.wait(timeout=5)
                 executor_stdout_handle.close()
                 executor_stderr_handle.close()
-                sync_repo_to_remote_url(sub_forward, forward_remote)
-                sync_repo_to_remote_url(sub_backward, backward_remote)
+                sync_repo_to_remote_url(sub_forward, forward_remote, data_branch)
+                sync_repo_to_remote_url(sub_backward, backward_remote, data_branch)
 
         rows = sorted(rows, key=lambda item: item["case_id"])
         done = sum(1 for row in rows if row["status"] == "done")
