@@ -111,14 +111,42 @@ sequenceDiagram
 
 ## Task State Model
 
-The protocol is intentionally small.
+A task has exactly three observable states. The backward repo is the only source of truth for which one the task is in.
 
-- No ACK, no result: task is claimable
-- ACK exists, result absent: task has been claimed
-- Result exists: task is terminal
-- `stale` is terminal and means the protocol deadline expired
+| State | Backward signature | Meaning |
+| --- | --- | --- |
+| `unclaimed` | no ACK, no result | scan sees a publishable task, no executor has taken it yet |
+| `running` | ACK exists, no result | an executor has taken it; it is either actively executing or orphaned from a prior executor run |
+| terminal: `done` / `failed` / `stale` | result exists | one result record is durably committed; no further transitions |
 
-The submitter does not wait for ACK. It waits only for the final result record.
+The submitter never observes `running`; it polls only for the terminal record.
+
+### Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> unclaimed: submitter publishes task
+    unclaimed --> running: executor writes ACK (blocking)
+    running --> done: worker exit code 0
+    running --> failed: worker exit code != 0
+    running --> stale: ACK age > task timeout
+    done --> [*]
+    failed --> [*]
+    stale --> [*]
+```
+
+Only the `unclaimed -> running` edge is synchronous from the main loop's perspective: the dispatcher will not spawn a worker until the ACK commit is durable. All other edges are published by workers or by main-loop reconciliation, and the main loop does not block on them.
+
+### Main-Loop Reconciliation
+
+Each scan pass classifies every visible forward task into one of the three states by looking at backward, then:
+
+- `unclaimed`: take the `unclaimed -> running` edge (ACK + spawn worker)
+- `running` with a live in-memory worker: do nothing, the worker will finalize
+- `running` without a live worker (orphan from a crashed executor run): compare ACK age to the task's own `timeout_seconds`. If exceeded, write a durable `stale` result; otherwise leave it alone and re-check next pass.
+- terminal: skip
+
+There is no fourth "permanently blocked" state. An ACK without an in-memory worker is always either still within the task's deadline (will be revisited) or past the deadline (will be stale-reconciled). Forward's two-hour scan window bounds how far back reconciliation looks — older orphans fall out of the window and stop appearing in scans, which is acceptable.
 
 ## Core Assumptions
 
@@ -203,26 +231,7 @@ Running multiple executors against the same forward/backward remotes is therefor
 
 ### Why Shared Worktree Is Unsafe
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as Submitter
-    participant F as shared forward worktree
-    participant B as shared backward worktree
-    participant E as Executor
-
-    par submit path
-        S->>F: fetch / checkout / reset
-        S->>B: fetch / checkout / reset
-        S->>F: add / commit / push
-    and executor path
-        E->>F: fetch / checkout / reset
-        E->>B: fetch / checkout / reset
-        E->>B: add / commit / push
-    end
-
-    Note over F,B: race is on one worktree, one index, and one set of Git lockfiles
-```
+Submitter and executor both run Git operations that mutate the index, HEAD, and `.git/` lockfiles — `fetch`, `checkout -B`, `reset --hard`, `add`, `commit`, `push`. Running both against one shared working directory races on those lockfiles even though the two roles touch disjoint logical paths (tasks vs acks/results). The conflict is on the worktree, not on the file content. Separate clones against the same remotes are the supported layout; the burst runners under `tools/` demonstrate this.
 
 ## Failure Model
 
@@ -250,9 +259,9 @@ Task timeout is protocol-visible:
 
 ### Interrupted Finalize
 
-If the executor is interrupted after ACK is durable but before final result is durable, the visible state may remain `ack only`.
+If the executor is interrupted after ACK is durable but before the terminal result is durable, the task's backward signature is `ACK without result` — the `running` state of the task state machine.
 
-That state is currently not auto-reclaimed.
+On restart the new main loop does not permanently block these tasks. Each scan pass applies the reconciliation rule from the Task State Model: reclaim the live-worker case, and stale-reconcile the orphan-past-deadline case. There is no separate "ack only" limbo.
 
 ## Operational Constraints
 

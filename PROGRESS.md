@@ -69,7 +69,13 @@
 - [x] Add unit coverage for `ensure_repo` rejecting a non-empty non-git target directory
 - [x] Document a cleanup path for legacy machines with `.git/modules/agent_forward` / `.git/modules/agent_backward` left over from the removed submodule layout
 - [x] Make `scan` log print `claimed` / `skipped_ack` / `skipped_result` breakdown instead of the misleading `pending=N` that hides pre-ACK'd tasks
-- [ ] Decide whether `ack-only` tasks (ACK durable, no result, prior executor crashed) should be auto-reclaimed on startup; today `_recover_from_backward` freezes them into `blocked_tasks`
+- [x] Rename scan-log fields to state-model terms (`claimed` / `running` / `finished`) and suppress zero-value fields so idle scans stay quiet
+- [x] Drop the `finished=` count from the scan log; terminal tasks dominate the 2h window and add no signal
+- [x] Cut `v0.1.2` with `reviews/v0.1.2.md` and `evaluations/v0.1.2.md`
+- [x] Replace the `ack-only freezes into blocked_tasks` behavior in the design with an explicit task state machine (`unclaimed` / `running` / terminal) and main-loop reconciliation rules in `DESIGN.md`
+- [x] Trim `DESIGN.md` sequence-diagram density: drop the shared-worktree diagram, keep state machine + writer diagrams
+- [ ] Implement main-loop reconciliation for orphaned `running` tasks: track ACK timestamps on startup, per scan check age vs `timeout_seconds`, emit durable `stale` when exceeded, stop using the permanent `blocked_tasks` freeze
+- [ ] Add unit coverage for the state machine edges: `unclaimed -> running`, `running -> done/failed`, and orphaned-`running -> stale` on restart
 
 
 ## Notes

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.1.1"
+PACKAGE_VERSION = "v0.1.2"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
 
 

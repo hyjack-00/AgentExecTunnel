@@ -366,10 +366,10 @@ class Executor:
         if scanned == 0:
             self.debug("scan: no pending tasks")
         else:
-            self.log(
-                f"scan scanned={scanned} claimed={claimed} "
-                f"skipped_ack={skipped_ack} skipped_result={skipped_result}"
-            )
+            fields = [("claimed", claimed), ("running", skipped_ack)]
+            parts = [f"{name}={value}" for name, value in fields if value]
+            if parts:
+                self.log("scan " + " ".join(parts))
         return ScanStats(scanned=scanned, claimed=claimed, skipped_result=skipped_result, skipped_ack=skipped_ack)
 
     def _ack_and_start_worker(self, task: dict) -> None:
