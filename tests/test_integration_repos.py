@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -112,3 +114,60 @@ class IntegrationReposTests(unittest.TestCase):
             submit_result = result_holder["result"]
             self.assertEqual(submit_result.payload["status"], "done")
             self.assertIn("hello-from-forward", submit_result.payload["stdout_tail"])
+
+    def test_submitter_and_executor_can_communicate_via_two_whole_tunnel_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            forward_seed = init_bare_and_clone(root, "forward_seed")
+            backward_seed = init_bare_and_clone(root, "backward_seed")
+            seed_forward_repo(forward_seed)
+            seed_backward_repo(backward_seed)
+            forward_remote = root / "forward_seed.git"
+            backward_remote = root / "backward_seed.git"
+
+            source_root = Path("/workspace/AgentExecTunnel")
+            submitter_tunnel = root / "submitter_tunnel"
+            executor_tunnel = root / "executor_tunnel"
+            ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", "agent_forward", "agent_backward", "var")
+            shutil.copytree(source_root, submitter_tunnel, ignore=ignore)
+            shutil.copytree(source_root, executor_tunnel, ignore=ignore)
+
+            for tunnel in (submitter_tunnel, executor_tunnel):
+                run(["git", "clone", str(forward_remote), str(tunnel / "agent_forward")])
+                run(["git", "clone", str(backward_remote), str(tunnel / "agent_backward")])
+                run(["git", "config", "user.email", "agent@example.com"], cwd=tunnel / "agent_forward")
+                run(["git", "config", "user.name", "agent"], cwd=tunnel / "agent_forward")
+                run(["git", "config", "user.email", "agent@example.com"], cwd=tunnel / "agent_backward")
+                run(["git", "config", "user.name", "agent"], cwd=tunnel / "agent_backward")
+
+            errors: list[str] = []
+            executor_proc = subprocess.Popen(
+                ["python3", "executor/run_executor.py"],
+                cwd=executor_tunnel,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                proc = subprocess.run(
+                    ["python3", "submitter/submit_gitbash.py", "python3 -c \"print('whole-tunnel-roundtrip')\""],
+                    cwd=submitter_tunnel,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=30,
+                )
+            finally:
+                executor_proc.terminate()
+                try:
+                    stdout, stderr = executor_proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    executor_proc.kill()
+                    stdout, stderr = executor_proc.communicate(timeout=5)
+                if executor_proc.returncode not in (0, -15):
+                    errors.append(stderr or stdout or f"executor exit={executor_proc.returncode}")
+
+            self.assertFalse(errors, "\n".join(errors))
+            self.assertIn("SUBMITTED command_id=", proc.stdout)
+            self.assertIn("whole-tunnel-roundtrip", proc.stdout)

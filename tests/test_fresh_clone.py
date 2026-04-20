@@ -27,6 +27,8 @@ class FreshCloneTests(unittest.TestCase):
 
             fresh_tunnel = root / "AgentExecTunnel"
             run(["git", "clone", str(tunnel_origin), str(fresh_tunnel)])
+            run(["git", "config", "-f", ".gitmodules", "submodule.agent_forward.url", str(forward_origin)], cwd=fresh_tunnel)
+            run(["git", "config", "-f", ".gitmodules", "submodule.agent_backward.url", str(backward_origin)], cwd=fresh_tunnel)
             run(["git", "-c", "protocol.file.allow=always", "submodule", "sync", "--recursive"], cwd=fresh_tunnel)
             run(["git", "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd=fresh_tunnel)
 

@@ -41,17 +41,22 @@
 - [ ] Add configurable SSH probe presets for availability
 - [x] Review whether a single shared working clone is acceptable when submitter and executor run on one machine
 - [x] Rename submodule working directories to `agent_forward/` and `agent_backward/` and align docs with the sibling repo names
-- [x] Switch `.gitmodules` to explicit GitHub HTTPS URLs
+- [x] Switch `.gitmodules` to explicit GitHub SSH URLs
 - [x] Change default runtime roots to repository-local submodule paths
 - [x] Add repo-operation sequence diagrams explaining supported separate clones vs unsupported shared worktrees
 - [x] Make bootstrap repair local file-based submodule origins into repo-local bare remotes
 - [x] Restore legacy-style infinite retry / backoff for executor git sync and push paths
 - [x] Keep executor scan loop alive across transient git/network failures
-- [x] Convert executor command timeout into durable failed result instead of process crash
+- [x] Convert executor command timeout into durable stale result instead of process crash
 - [x] Document the continuously-running executor model in `DESIGN.md`
-- [x] Clarify the actual task lifecycle: durable ACK first, then one blocking task execution, then durable final result
+- [x] Clarify the actual task lifecycle: durable ACK first, then async active-set execution, then durable final/stale result
 - [x] Clarify that current output visibility is final-result polling, not protocol-level streaming
-- [ ] If desired later: reintroduce active-process async monitoring for long tasks instead of the current one-task blocking model
+- [x] Reintroduce active-process async monitoring for all tasks
+- [x] Restore legacy-style submitter CLI output with `SUBMITTED command_id=...` and tail replay
+- [x] Rework executor into asymmetric dispatcher + worker + single git writer model
+- [x] Add whole-`AgentExecTunnel` dual-checkout communication coverage
+- [x] Document fresh-machine startup sequence and what can be skipped on subsequent updates in README
+- [ ] Add executor preflight check that fails fast with a "run bootstrap first" hint when submodules are not initialized
 
 
 ## Notes
@@ -61,6 +66,8 @@
 - Real local integration is currently covered with separate submitter/executor working clones against the same bare remotes.
 - The current 30-second local burst diagnostic passed with `30/30` completed tasks using separate submitter clones and a fake relay ssh shim.
 - Same remotes are supported; a shared submitter/executor working clone is not the supported deployment model.
-- `.gitmodules` now declares explicit HTTPS origins for both data submodules.
-- Executor now follows the intended long-running model: transient git/network failures are retried with backoff and task timeout is finalized as one durable failed result.
-- Current executor is still single-task blocking after claim; it does not yet maintain an active in-memory async task set.
+- `.gitmodules` now declares explicit SSH origins for both data submodules.
+- Submitter pre-publish sync/publish paths use bounded retry; only the executor is intentionally infinite-retry.
+- Executor now follows the intended long-running model: transient git/network failures are retried with backoff and backward writes are serialized through one writer clone.
+- Timeout now finalizes as durable `stale` while the local process may continue detached.
+- Submitter/executor are intentionally non-symmetric: submitter syncs backward before publish/result trust, while executor steady-state dispatch only syncs forward after startup recovery.

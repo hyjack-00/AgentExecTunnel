@@ -33,11 +33,52 @@ The architecture allows multiple submitters to publish into forward concurrently
 - `python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'`
 - `python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir`
 - `python3 executor/run_executor.py`
+- `python3 tools/run_burst_local_relay.py --tasks 30 --interval-seconds 1 --submit-timeout 512 --result-timeout 900 --executor-ready-timeout 120 --submitter gitbash --gitbash-executable /path/to/bash`
+- `python3 tools/run_burst_live.py --duration-seconds 30 --tasks 30 --submit-timeout 512 --result-timeout 300 --mode-set mixed --submitter gitbash --gitbash-executable /path/to/bash`
 - `python3 tools/run_burst_real_submodules.py --duration-seconds 30 --tasks 30 --use-fake-ssh`
 - `python3 tools/repair_task.py --task-id ... --clear-ack`
 - `python3 tests/availability/probe.py --probe-id relay_echo --count 1`
 - `python3 tests/availability/probe.py --probe-id ssh_h20_nvidia_smi --ssh-host H20 --count 1`
 - `python3 tests/availability/report.py --serve`
+
+## Startup
+
+Fresh-machine first run — three steps, in order:
+
+```bash
+git clone <AgentExecTunnel remote> && cd AgentExecTunnel
+git submodule update --init --recursive          # 1. fetch agent_forward / agent_backward
+python3 tools/bootstrap_repos.py                  # 2. verify submodule origins, repair if needed
+python3 executor/run_executor.py                  # 3. start executor
+```
+
+Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). The submodule remotes listed in `.gitmodules` must be reachable from this machine — if they are private GitHub repos, configure SSH access **before** step 1, otherwise step 1 will fail during submodule clone/fetch.
+
+### What can be skipped on subsequent updates
+
+After the first successful bootstrap, routine update on the same machine is just:
+
+```bash
+git pull
+git submodule update --recursive                  # pick up tunnel-pinned submodule SHAs
+python3 executor/run_executor.py
+```
+
+- Skip `--init`: submodules are already initialized; `--recursive` alone is enough to advance them.
+- Skip `bootstrap_repos.py` **unless** one of these changed: `.gitmodules` URLs, the `var/local_remotes/` layout, or the submodule `remote.origin.url` got rewritten. Bootstrap is idempotent, so re-running it is safe but usually a no-op on steady-state machines.
+- Skip Python dependency setup entirely — there is none.
+
+Always needed, even on updates:
+
+- A running executor loop (`executor/run_executor.py`) — it does not survive `git pull` by itself; restart after pulling.
+- Network access to the submodule remotes — the executor does `git fetch` every scan pass.
+
+### When a re-bootstrap is actually required
+
+- First clone on a new machine.
+- Switching the submodule origin between GitHub SSH and a local bare remote under `var/local_remotes/`.
+- Recovering from a wiped `agent_forward/` or `agent_backward/` working tree.
+- Moving the checkout to a new path where relative submodule origins no longer resolve.
 
 ## Process
 
@@ -82,10 +123,15 @@ Behavior:
 
 `python3 tools/bootstrap_repos.py` now also repairs local file-based submodule origins: if a submodule still points at an out-of-repo sibling path, bootstrap rewires it to a repository-local bare remote under `var/local_remotes/`.
 
-The checked-in `.gitmodules` now uses explicit HTTPS URLs:
+The checked-in `.gitmodules` now uses explicit SSH URLs:
 
-- `https://github.com/hyjack-00/agent_forward.git`
-- `https://github.com/hyjack-00/agent_backward.git`
+- `git@github.com:hyjack-00/agent_forward.git`
+- `git@github.com:hyjack-00/agent_backward.git`
+
+On non-Windows hosts, `submit_gitbash.py` can still be used by overriding the executable path:
+
+- CLI: `--gitbash-executable /path/to/bash` on the burst tools
+- environment: `AET_GIT_BASH_EXECUTABLE=/path/to/bash`
 
 ## Synchronization
 
@@ -93,10 +139,11 @@ Even though forward and backward are single-purpose data repositories, synchroni
 
 - submitter must sync forward and backward before publication
 - submitter must sync backward before trusting final result visibility
-- executor must sync forward and backward before deciding whether a task is claimable
+- executor startup may sync backward for recovery, but steady-state dispatch only syncs forward
 - backward is the only authority for terminal state
-- the continuously-running executor now retries transient git sync/push failures forever with backoff
-- task subprocess timeout is written as a durable `failed` result instead of crashing the executor
+- executor retries transient git sync/push failures forever with backoff
+- submitter uses bounded retry on pre-publish sync and publish push paths
+- task subprocess timeout is written as a durable `stale` result instead of crashing the executor
 
 Relay and ssh are different submit wrappers, but they are the same runtime class of work for executor: one claimed task becomes one executed command.
 
@@ -137,15 +184,17 @@ The supported executor model is a long-running loop:
 - transient fetch/push failures must be retried forever
 - temporary disconnects are expected to recover later
 - executor must keep reconnecting instead of exiting
-- task timeout must become one durable final result in `agent_backward/results/...`
+- task timeout must become one durable protocol result in `agent_backward/results/...`
 
 More specifically, the current executor behavior is:
 
+- startup does one backward recovery sync, then steady-state scans only sync forward
 - scan finds one claimable task
-- ACK is pushed durably first
-- only after durable ACK does executor run the task
-- executor then blocks on that task until exit / timeout
-- final output is published once as one final result record
+- ACK is pushed durably first by a single git-writer thread
+- only after durable ACK does executor start one async worker
+- worker then owns `execute -> finalize` and the main loop does not poll child state
+- timeout writes one durable `stale` result and leaves the local process detached
+- final output is still published only once as one final result/stale record
 - submitter polls only for final result, not for ACK or streaming output
 
 ## Skill

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import importlib
+import os
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
 
 from submitter._submit_common import (
@@ -15,6 +17,8 @@ from submitter._submit_common import (
     render_relay_command,
     render_ssh_command,
     require_single_payload,
+    submit_and_wait,
+    timeout_exit,
     write_gitbash_relay_preview,
     write_gitbash_ssh_preview,
     write_relay_preview,
@@ -23,6 +27,17 @@ from submitter._submit_common import (
 
 
 class SubmitterInterfaceTests(unittest.TestCase):
+    def test_gitbash_executable_can_be_overridden_by_env(self) -> None:
+        module = importlib.import_module("submitter._submit_common")
+        try:
+            with mock.patch.dict(os.environ, {"AET_GIT_BASH_EXECUTABLE": "/bin/bash"}, clear=False):
+                module = importlib.reload(module)
+                command, relay_script = module.render_gitbash_relay_command("echo hi")
+                self.assertEqual(command, '/bin/bash -c "echo hi"')
+                self.assertEqual(relay_script, "echo hi")
+        finally:
+            module = importlib.reload(module)
+
     def test_require_single_payload_validates_shape(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing payload"):
             require_single_payload([], "submit_gitbash.py")
@@ -76,3 +91,32 @@ class SubmitterInterfaceTests(unittest.TestCase):
             write_gitbash_ssh_preview("submit_gitbash_ssh.py", "H20", 'python3 -c "print(1)"')
         self.assertIn(f'-> "{GIT_BASH_EXECUTABLE}" -c "ssh H20 ', stream.getvalue())
         self.assertIn('    -> python3 -c "print(1)"', stream.getvalue())
+
+    def test_submit_and_wait_uses_legacy_command_id_and_tail_replay(self) -> None:
+        stdout_stream = io.StringIO()
+        stderr_stream = io.StringIO()
+        with mock.patch("submitter._submit_common.new_task_id", return_value="cmd-123"), \
+             mock.patch("submitter._submit_common.publish_task") as publish_task, \
+             mock.patch("submitter._submit_common._poll_for_result", return_value={
+                 "status": "done",
+                 "stdout_tail": "hello\n",
+                 "stderr_tail": "warn\n",
+                 "exit_code": 0,
+             }):
+            with redirect_stdout(stdout_stream), redirect_stderr(stderr_stream):
+                with self.assertRaises(SystemExit) as exc:
+                    submit_and_wait("submit_gitbash.py", "echo hello", "relay", 512)
+        self.assertEqual(exc.exception.code, 0)
+        publish_task.assert_called_once()
+        self.assertIn("SUBMITTED command_id=cmd-123", stdout_stream.getvalue())
+        self.assertIn("hello", stdout_stream.getvalue())
+        self.assertIn("warn", stderr_stream.getvalue())
+
+    def test_timeout_exit_matches_legacy_shape(self) -> None:
+        stderr_stream = io.StringIO()
+        with redirect_stderr(stderr_stream):
+            with self.assertRaises(SystemExit) as exc:
+                timeout_exit(512, "cmd-456", "git fetch failed")
+        self.assertEqual(exc.exception.code, 124)
+        self.assertIn("timeout after 512s waiting for final result command_id=cmd-456", stderr_stream.getvalue())
+        self.assertIn("last sync error: git fetch failed", stderr_stream.getvalue())

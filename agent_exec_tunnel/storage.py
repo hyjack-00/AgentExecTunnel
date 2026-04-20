@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -8,15 +9,26 @@ from pathlib import Path
 from typing import Any
 
 
+GIT_ENV = os.environ.copy()
+GIT_ENV.setdefault("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes")
+
+
+def _quiet_git_args(args: list[str]) -> list[str]:
+    if args and args[0] in {"fetch", "push", "clone"} and "--quiet" not in args:
+        return [args[0], "--quiet", *args[1:]]
+    return args
+
+
 def run_git(repo_root: Path, args: list[str], timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *_quiet_git_args(args)],
         cwd=repo_root,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout_seconds,
+        env=GIT_ENV,
     )
 
 
@@ -34,6 +46,7 @@ def _maybe_abort_rebase(repo_root: Path) -> None:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=GIT_ENV,
     )
 
 
@@ -66,6 +79,7 @@ def git_commit_push(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout_seconds,
+        env=GIT_ENV,
     )
     if status.stdout.strip():
         run_git(repo_root, ["commit", "-m", message], timeout_seconds=timeout_seconds)

@@ -21,7 +21,7 @@ Protocol rules:
 - if `result` exists in backward, the task is terminal
 - if no `result` exists but `ack` exists in backward, the task has already been taken and must not be reclaimed
 - only when neither `result` nor `ack` exists is the task claimable
-- there is no `stale` result in this architecture
+- `stale` is also a terminal result and means the protocol deadline expired after ACK
 
 Task files are bucketed by hour so executor scan cost stays bounded.
 
@@ -84,7 +84,7 @@ Reasons:
 
 1. submitter must not decide whether a task was completed based on local memory or a stale local clone
 2. executor must not decide whether a task is claimable based on a stale local clone
-3. backward is the authority for `ack` and `result`, so every meaningful decision must be based on a recent backward sync
+3. backward is the authority for terminal history, but in the single-executor model steady-state dispatch does not need repeated backward sync
 4. forward is the source of new tasks, so executor must sync forward before each scan pass
 5. with multiple submitters, forward publication must tolerate concurrent git pushes and converge by retry/rebase
 
@@ -187,10 +187,9 @@ sequenceDiagram
 State model:
 
 - `no result + no ack` => claimable
-- `ack only` => taken / suspended
+- `ack only` => taken / running / suspended
 - `result present` => terminal
-
-There is no automatic conversion from `ack only` to `failed` or `stale`.
+- `stale result present` => terminal, but the local child process may still continue detached
 
 ## Windows And Scan Scope
 
@@ -313,43 +312,46 @@ State interpretation:
 - `ack exists, no result` => claimed / in progress / suspended after executor-side failure
 - `result exists` => terminal
 
-## Sequence: Current Executor Blocking Model
+## Sequence: Current Executor Dispatcher / Worker / Writer Model
 
-This section is specifically about what the current `v0.0.7` implementation does.
+This section is specifically about what the current dispatcher-only executor does.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Loop as Executor scan loop
+    participant Loop as Executor main loop
     participant F as forward clone
-    participant B as backward clone
+    participant W as single git writer
+    participant BW as backward-write clone
     participant P as One child process
 
     Loop->>F: sync + scan
-    Loop->>B: check ack/result
-    Loop->>B: write ACK
-    Loop->>B: retry push forever until ACK is durable
-    Loop->>P: run one task
-    Note over Loop,P: current implementation blocks here
-    P-->>Loop: exit / timeout
-    Loop->>B: write final result
-    Loop->>B: retry push forever until result is durable
-    Loop-->>Loop: continue next scan
+    Loop->>W: enqueue ACK request
+    W->>BW: write ACK + commit + push
+    W-->>Loop: ACK durable
+    Loop->>P: start async worker
+    Loop-->>Loop: continue scanning forward only
+    P-->>W: final/stale payload
+    W->>BW: write result + commit + push
+    W-->>P: result durable
 ```
 
 Current behavior:
 
-- after a task is claimed, the scan loop stays focused on that one task
-- if ACK push is blocked by network loss, the scan loop waits there
-- if the task process is still running, the scan loop waits there
-- if result push is blocked by network loss, the scan loop waits there
+- submitter and executor are intentionally asymmetric
+- submitter still syncs backward before publish/result trust
+- executor does one startup backward recovery sync, then steady-state only scans forward
+- ACK is still synchronous from the main loop's perspective
+- child execution and finalize are asynchronous worker-owned steps
+- all backward writes are serialized through one git writer and one backward-write clone
 
 So the current model is:
 
 - durable ACK first
-- then run exactly one task
-- then durable final result
-- only then continue scanning
+- then start one async worker
+- worker owns `execute -> finalize`
+- main loop only dispatches new tasks from forward
+- final result or stale result is pushed durably by the single writer
 
 ## Sequence: Current Output Visibility Model
 
@@ -383,17 +385,6 @@ Current output semantics:
 - executor captures local child output and publishes only one final tail snapshot
 - submitter learns output by polling backward for the final result file
 
-## What Is Not Yet Implemented
-
-The following model is **not** what the current executor does today:
-
-- start many child tasks and put them into an in-memory active set
-- return immediately to scan more tasks
-- let later scan passes poll those active tasks
-- finalize them asynchronously when they exit
-
-That was closer to one branch of the old monolith design for tracked SSH tasks, but it is not the current behavior of this repository.
-
 ## Weak-Network / Intermittent Disconnect Model
 
 The system is designed for networks that may repeatedly disconnect or have long delays.
@@ -419,22 +410,21 @@ Behavior under disconnect:
 
 Executor path:
 
-1. sync forward
-2. sync backward
-3. decide claimability using backward
-4. push ack
-5. run task
-6. push result
+1. startup sync forward/backward and recover prior ack/result state
+2. steady-state sync forward
+3. push ack through single writer
+4. run task in worker
+5. push result through single writer
 
 Behavior under disconnect:
 
-- if executor cannot sync forward/backward, that scan pass cannot make a trustworthy claim decision
+- if executor cannot sync forward, that scan pass cannot make a trustworthy claim decision
 - if executor cannot push ACK, it must not proceed as if the task was durably claimed
 - if executor already wrote ACK but cannot later push result, the task remains `ack only`
 - because `ack only` is not auto-reclaimed, the task is suspended until manual repair
 - executor is expected to keep retrying sync / push forever with backoff rather than exiting on transient network loss
 - git reconnect is therefore part of the steady-state operating model, not an exceptional shutdown path
-- task subprocess timeout must be converted into one durable final result with `status=failed`, not an executor crash
+- task subprocess timeout must be converted into one durable `stale` result, not an executor crash
 
 This is intentional:
 
@@ -449,6 +439,7 @@ Under very poor connectivity, the most likely visible symptoms are:
 - delayed final result visibility
 - caller-side timeout even though the remote side may have progressed
 - accumulation of ack-only tasks if executors can claim but cannot durably write final results
+- accumulation of `stale` results for long-running tasks that outlive their deadline
 - temporary forward publish contention between multiple submitters
 
 The repair tools exist specifically for this regime.
@@ -544,7 +535,7 @@ sequenceDiagram
     E->>EB: git add + commit
     E->>BO: git push
     Note over E: on transient git failure, retry forever with backoff
-    Note over E: on task timeout, write one failed result and continue loop
+    Note over E: on task timeout, write one stale result and continue loop
 ```
 
 Key point:

@@ -121,10 +121,12 @@ class ResultRecord:
     stdout_tail: str
     stderr_tail: str
     command_digest: str
+    process_ref: str | None = None
+    stale_at: str | None = None
     version: str = PACKAGE_VERSION
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload = {
             "version": self.version,
             "task_id": self.task_id,
             "forward_task_path": self.forward_task_path,
@@ -137,6 +139,11 @@ class ResultRecord:
             "stderr_tail": self.stderr_tail,
             "command_digest": self.command_digest,
         }
+        if self.process_ref is not None:
+            payload["process_ref"] = self.process_ref
+        if self.stale_at is not None:
+            payload["stale_at"] = self.stale_at
+        return payload
 
 
 def task_path(root: Path, task_id: str, now: datetime | None = None) -> Path:
