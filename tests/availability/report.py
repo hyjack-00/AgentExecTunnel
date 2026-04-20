@@ -19,7 +19,7 @@ def build_report(records: list[dict], mode: str) -> str:
     total = len(records)
     ok = sum(1 for r in records if r.get("outcome") == "ok")
     means = {}
-    for key in ("ack_latency_s", "execution_latency_s", "result_latency_s", "total_latency_s"):
+    for key in ("execution_latency_s", "total_latency_s"):
         values = [float(r[key]) for r in records if isinstance(r.get(key), (int, float))]
         means[key] = (sum(values) / len(values)) if values else None
     rows = "\n".join(
@@ -40,9 +40,7 @@ def build_report(records: list[dict], mode: str) -> str:
 <h1>AgentExecTunnel Availability</h1>
 <p>mode={html.escape(mode)} total={total} ok={ok}</p>
 <ul>
-  <li>mean ack latency: {fmt(means['ack_latency_s'])}</li>
   <li>mean execution latency: {fmt(means['execution_latency_s'])}</li>
-  <li>mean result latency: {fmt(means['result_latency_s'])}</li>
   <li>mean total latency: {fmt(means['total_latency_s'])}</li>
 </ul>
 <table border="1" cellspacing="0" cellpadding="4">

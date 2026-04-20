@@ -28,15 +28,14 @@ class AvailabilityTests(unittest.TestCase):
                     "probe_id": "relay_echo",
                     "outcome": "ok",
                     "task_id": "t1",
-                    "ack_latency_s": 1.0,
                     "execution_latency_s": 2.0,
-                    "result_latency_s": 3.0,
                     "total_latency_s": 4.0,
                 }
             ],
             "manual",
         )
-        self.assertIn("mean ack latency", html)
+        self.assertIn("mean execution latency", html)
+        self.assertIn("mean total latency", html)
         self.assertIn("relay_echo", html)
 
     def test_probe_cli_accepts_ssh_host_override(self) -> None:
@@ -49,7 +48,6 @@ class AvailabilityTests(unittest.TestCase):
         args = mock.Mock(probe_id="ssh_echo", ssh_host="950")
         fake_result = mock.Mock(task_id="task-1", payload={"status": "done", "started_at": "2026-04-19T00:00:00Z", "finished_at": "2026-04-19T00:00:01Z"})
         with mock.patch("tests.availability.probe.default_settings"), \
-             mock.patch("tests.availability.probe.submit_task", return_value=fake_result), \
-             mock.patch("tests.availability.probe.read_ack_payload", return_value=None):
+             mock.patch("tests.availability.probe.submit_task", return_value=fake_result):
             record = availability_probe.run_once(args)
         self.assertEqual(record["target_host"], "950")

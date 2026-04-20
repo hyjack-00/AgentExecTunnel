@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Example:\n  python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--timeout-seconds", type=int, default=512)
+    parser.add_argument("--timeout-seconds", type=int, default=300)
     parser.add_argument("host", help="ssh target host")
     parser.add_argument("payload", nargs=argparse.REMAINDER, help="one whole target command string")
     return parser

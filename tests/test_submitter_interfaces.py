@@ -112,11 +112,20 @@ class SubmitterInterfaceTests(unittest.TestCase):
         self.assertIn("hello", stdout_stream.getvalue())
         self.assertIn("warn", stderr_stream.getvalue())
 
-    def test_timeout_exit_matches_legacy_shape(self) -> None:
+    def test_timeout_exit_reports_ntfy_unreachable(self) -> None:
         stderr_stream = io.StringIO()
         with redirect_stderr(stderr_stream):
             with self.assertRaises(SystemExit) as exc:
-                timeout_exit(512, "cmd-456", "git fetch failed")
+                timeout_exit(300, "cmd-456", ntfy_unreachable=True)
         self.assertEqual(exc.exception.code, 124)
-        self.assertIn("timeout after 512s waiting for final result command_id=cmd-456", stderr_stream.getvalue())
-        self.assertIn("last sync error: git fetch failed", stderr_stream.getvalue())
+        self.assertIn("timeout after 300s waiting for final result command_id=cmd-456", stderr_stream.getvalue())
+        self.assertIn("ntfy unreachable", stderr_stream.getvalue())
+
+    def test_timeout_exit_reports_executor_silent_when_ntfy_healthy(self) -> None:
+        stderr_stream = io.StringIO()
+        with redirect_stderr(stderr_stream):
+            with self.assertRaises(SystemExit) as exc:
+                timeout_exit(300, "cmd-456")
+        self.assertEqual(exc.exception.code, 124)
+        self.assertIn("ntfy reachable", stderr_stream.getvalue())
+        self.assertIn("executor may be down", stderr_stream.getvalue())
