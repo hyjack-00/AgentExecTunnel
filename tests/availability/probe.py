@@ -23,7 +23,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent_exec_tunnel.config import default_settings
-from agent_exec_tunnel.storage import git_sync, read_json
 from agent_exec_tunnel.submitter import submit_task
 from tests.availability.probes import DEFAULT_PROBES
 from tests.availability.storage import append_record, prune_old, utc_now
@@ -115,14 +114,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_ack_payload(task_id: str, backward_root: Path) -> dict | None:
-    git_sync(backward_root)
-    for path in backward_root.glob("acks/**/*.json"):
-        if path.name == f"{task_id}.json":
-            return read_json(path)
-    return None
-
-
 def _pick_probe(args: argparse.Namespace):
     if args.probe_id:
         return DEFAULT_PROBES[args.probe_id]
@@ -144,22 +135,15 @@ def run_once(args: argparse.Namespace) -> dict:
             result_timeout_seconds=settings.default_timeout_seconds,
         )
         finished = time.monotonic()
-        ack = read_ack_payload(result.task_id, settings.backward_root)
         payload = result.payload
-        ack_latency = None
         execution_latency = None
-        result_latency = None
-        if ack is not None:
-            try:
-                from agent_exec_tunnel.protocol import parse_iso_z
-                ack_dt = parse_iso_z(ack["ack_at"])
-                started_dt = parse_iso_z(payload["started_at"])
-                finished_dt = parse_iso_z(payload["finished_at"])
-                ack_latency = (ack_dt - started_at).total_seconds()
-                execution_latency = (finished_dt - started_dt).total_seconds()
-                result_latency = (finished_dt - ack_dt).total_seconds()
-            except Exception:
-                pass
+        try:
+            from agent_exec_tunnel.protocol import parse_iso_z
+            started_dt = parse_iso_z(payload["started_at"])
+            finished_dt = parse_iso_z(payload["finished_at"])
+            execution_latency = (finished_dt - started_dt).total_seconds()
+        except Exception:
+            pass
         return {
             "ts_utc": started_at.strftime("%Y-%m-%d %H:%M:%S"),
             "probe_id": spec.probe_id,
@@ -168,9 +152,7 @@ def run_once(args: argparse.Namespace) -> dict:
             "outcome": "ok",
             "status": payload["status"],
             "implies_ok": list(spec.implies_ok),
-            "ack_latency_s": ack_latency,
             "execution_latency_s": execution_latency,
-            "result_latency_s": result_latency,
             "total_latency_s": finished - started,
         }
     except Exception as exc:

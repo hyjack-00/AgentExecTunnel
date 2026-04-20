@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+import secrets
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from .config import PACKAGE_VERSION
@@ -22,27 +22,12 @@ def parse_iso_z(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
-def hour_bucket_parts(moment: datetime) -> tuple[str, str, str, str]:
-    dt = moment.astimezone(UTC)
-    return (f"{dt:%Y}", f"{dt:%m}", f"{dt:%d}", f"{dt:%H}")
-
-
-def iter_hour_buckets(now: datetime, hours: int) -> list[tuple[str, str, str, str]]:
-    buckets: list[tuple[str, str, str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    for offset in range(hours):
-        bucket = hour_bucket_parts(now - timedelta(hours=offset))
-        if bucket not in seen:
-            seen.add(bucket)
-            buckets.append(bucket)
-    return buckets
-
-
 def new_task_id(now: datetime | None = None) -> str:
     moment = now or utc_now()
     base = moment.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    digest = hashlib.sha1(f"{moment.timestamp()}".encode()).hexdigest()[:6]
-    return f"{base}-{digest}"
+    digest = hashlib.sha1(f"{moment.timestamp()}".encode()).hexdigest()[:12]
+    jitter = secrets.token_hex(2)
+    return f"{base}-{digest}{jitter}"
 
 
 def command_digest(command: str, submit_mode: str, target_host: str | None) -> str:
@@ -66,12 +51,12 @@ class TaskRecord:
     target_host: str | None
     command: str
     timeout_seconds: int
-    forward_task_path: str
-    metadata: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
     version: str = PACKAGE_VERSION
 
-    def to_json(self) -> dict[str, Any]:
+    def to_envelope(self) -> dict[str, Any]:
         return {
+            "kind": "task",
             "version": self.version,
             "task_id": self.task_id,
             "created_at": self.created_at,
@@ -80,39 +65,13 @@ class TaskRecord:
             "target_host": self.target_host,
             "command": self.command,
             "timeout_seconds": self.timeout_seconds,
-            "forward_task_path": self.forward_task_path,
             "metadata": self.metadata,
-        }
-
-
-@dataclass(frozen=True)
-class AckRecord:
-    task_id: str
-    forward_task_path: str
-    executor_id: str
-    ack_at: str
-    submit_mode: str
-    target_host: str | None
-    command_digest: str
-    version: str = PACKAGE_VERSION
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "version": self.version,
-            "task_id": self.task_id,
-            "forward_task_path": self.forward_task_path,
-            "executor_id": self.executor_id,
-            "ack_at": self.ack_at,
-            "submit_mode": self.submit_mode,
-            "target_host": self.target_host,
-            "command_digest": self.command_digest,
         }
 
 
 @dataclass(frozen=True)
 class ResultRecord:
     task_id: str
-    forward_task_path: str
     executor_id: str
     status: str
     started_at: str
@@ -125,11 +84,11 @@ class ResultRecord:
     stale_at: str | None = None
     version: str = PACKAGE_VERSION
 
-    def to_json(self) -> dict[str, Any]:
-        payload = {
+    def to_envelope(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": "result",
             "version": self.version,
             "task_id": self.task_id,
-            "forward_task_path": self.forward_task_path,
             "executor_id": self.executor_id,
             "status": self.status,
             "started_at": self.started_at,
@@ -144,18 +103,3 @@ class ResultRecord:
         if self.stale_at is not None:
             payload["stale_at"] = self.stale_at
         return payload
-
-
-def task_path(root: Path, task_id: str, now: datetime | None = None) -> Path:
-    y, m, d, h = hour_bucket_parts(now or utc_now())
-    return root / "tasks" / y / m / d / h / f"{task_id}.json"
-
-
-def ack_path(root: Path, task_id: str, when: datetime | None = None) -> Path:
-    y, m, d, h = hour_bucket_parts(when or utc_now())
-    return root / "acks" / y / m / d / h / f"{task_id}.json"
-
-
-def result_path(root: Path, task_id: str, when: datetime | None = None) -> Path:
-    y, m, d, h = hour_bucket_parts(when or utc_now())
-    return root / "results" / y / m / d / h / f"{task_id}.json"
