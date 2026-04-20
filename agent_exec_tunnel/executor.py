@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .config import Settings, default_settings
 from .ntfy_transport import NtfyConfig, poll_loop, publish_forever, seed_seen_ids
-from .protocol import ResultRecord, command_digest, iso_z, utc_now
+from .protocol import AckRecord, ResultRecord, command_digest, iso_z, parse_iso_z, utc_now
 from .storage import tail_text
 
 
@@ -48,11 +48,16 @@ class Executor:
         self.settings = settings or default_settings()
         self.executor_id = executor_id or default_executor_id()
         self._state_lock = threading.Lock()
-        self.seen_ids: set[str] = set()
+        # seen_ids is task_id -> monotonic insert time. Pruned lazily by
+        # `_maybe_prune_seen_ids` so a long-running executor does not hoard
+        # every task_id it has ever seen. The TTL comes from
+        # `Settings.seen_ids_ttl_seconds` (default 1h = 2× the poll window).
+        self.seen_ids: dict[str, float] = {}
         self.running_tasks: set[str] = set()
         self.worker_done: dict[str, threading.Event] = {}
         self.cleanup_threads: list[threading.Thread] = []
         self._stop_flag = threading.Event()
+        self._last_prune_monotonic: float = 0.0
         self.ntfy = NtfyConfig(
             server_url=self.settings.ntfy_server_url,
             forward_topic=self.settings.ntfy_forward_topic,
@@ -67,8 +72,46 @@ class Executor:
         """Called from the poll thread. A task is 'seen' if it has already
         finished (published successfully) or is still in flight on a worker
         thread (the worker will publish-forever-until-success)."""
+        self._maybe_prune_seen_ids()
         with self._state_lock:
             return task_id in self.seen_ids or task_id in self.running_tasks
+
+    def _mark_seen(self, task_id: str) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            self.seen_ids[task_id] = now
+
+    def _maybe_prune_seen_ids(self) -> None:
+        """Drop task_ids older than `seen_ids_ttl_seconds`. Bounded to run at
+        most once per minute so it's cheap to call from the hot dedup path."""
+        now = time.monotonic()
+        if now - self._last_prune_monotonic < 60.0:
+            return
+        self._last_prune_monotonic = now
+        ttl = float(self.settings.seen_ids_ttl_seconds)
+        cutoff = now - ttl
+        with self._state_lock:
+            stale = [tid for tid, t in self.seen_ids.items() if t < cutoff]
+            for tid in stale:
+                del self.seen_ids[tid]
+        if stale:
+            self.debug(f"seen_ids pruned {len(stale)} entries (ttl={ttl:.0f}s)")
+
+    @staticmethod
+    def _is_expired(task: dict) -> bool:
+        """True if the task envelope is older than its declared timeout — the
+        boundary case where a task near the end of the poll window would have
+        no ACK/result on backward and should not be dispatched anyway."""
+        created_at = task.get("created_at")
+        timeout = task.get("timeout_seconds")
+        if not isinstance(created_at, str) or not isinstance(timeout, int) or timeout <= 0:
+            return False
+        try:
+            created_dt = parse_iso_z(created_at)
+        except ValueError:
+            return False
+        age = (utc_now() - created_dt).total_seconds()
+        return age > float(timeout)
 
     def log(self, message: str) -> None:
         print(f"[{_log_now()}] {message}", flush=True)
@@ -86,11 +129,18 @@ class Executor:
         self._stop_flag.set()
 
     def run_loop(self) -> None:
+        # Seed seen_ids from every ACK / result envelope on the backward topic
+        # in the last poll window. This is how a restart avoids re-running a
+        # task that was ACKed but whose result envelope was never published
+        # (e.g., the executor crashed mid-run). The previous instance's ACK
+        # is sufficient signal to keep us from re-dispatching.
         seed = seed_seen_ids(self.ntfy, self.ntfy.backward_topic)
         if seed:
+            now = time.monotonic()
             with self._state_lock:
-                self.seen_ids.update(seed)
-            self.log(f"ntfy seed: {len(seed)} already-finished task_ids loaded from backward topic")
+                for task_id in seed:
+                    self.seen_ids[task_id] = now
+            self.log(f"ntfy seed: {len(seed)} already-ack'd-or-finished task_ids loaded from backward topic")
         cap_seconds = self.settings.default_timeout_seconds / 2.0
         self.log(
             f"ntfy poll loop starting topic={self.ntfy.forward_topic} "
@@ -113,12 +163,20 @@ class Executor:
         if not isinstance(task_id, str) or not task_id:
             self.log(f"ntfy drop envelope with no task_id: {task!r}")
             return
+        # Boundary guard: a task envelope visible in the poll window that is
+        # already past its own timeout must not be dispatched. This closes
+        # the near-window-edge race where the backward topic shows neither
+        # ACK nor result (because the prior attempt was rate-limited or the
+        # window just scrolled past it). Silently mark it seen so we don't
+        # re-inspect on the next poll.
+        if self._is_expired(task):
+            self.log(f"ntfy skip expired task_id={task_id} (envelope age > timeout_seconds)")
+            self._mark_seen(task_id)
+            return
         # Atomically claim the task_id into running_tasks. If another envelope
-        # copy arrived in the same poll batch (ntfy replay on the 2h window),
+        # copy arrived in the same poll batch (ntfy replay on the window),
         # whoever lost the race just returns. We do NOT add to seen_ids here —
-        # seen_ids only flips once the result is successfully published, so
-        # a mid-task executor crash leaves the task eligible for re-run on a
-        # different executor (documented MVP trade-off).
+        # the worker flips it only after its ACK envelope lands in backward.
         with self._state_lock:
             if task_id in self.seen_ids or task_id in self.running_tasks:
                 return
@@ -186,7 +244,34 @@ class Executor:
         )
         thread.start()
 
+    def _publish_ack(self, task_id: str) -> bool:
+        """Publish the claim-ACK envelope to the backward topic. Blocks
+        the worker thread until ntfy accepts, so a later executor crash or
+        restart observing this ACK will skip the task (no re-run). Only
+        returns False if the executor is being stopped."""
+        ack = AckRecord(
+            task_id=task_id,
+            executor_id=self.executor_id,
+            ack_at=iso_z(utc_now()),
+        )
+        return publish_forever(
+            self.ntfy,
+            self.ntfy.backward_topic,
+            ack.to_envelope(),
+            log=self.log,
+            stop=self._stop_flag.is_set,
+        )
+
     def _run_task_worker(self, task: dict) -> None:
+        task_id = task["task_id"]
+        # Publish ACK *before* touching any side effects. A stopped executor
+        # (stop flag set during a publish retry loop) returns False here and
+        # we exit cleanly without having run the command.
+        if not self._publish_ack(task_id):
+            self.log(f"ack publish aborted task_id={task_id} (executor stopping)")
+            with self._state_lock:
+                self.running_tasks.discard(task_id)
+            return
         started_at_dt = utc_now()
         started_at = iso_z(started_at_dt)
         deadline_at = started_at_dt + timedelta(seconds=int(task["timeout_seconds"]))
@@ -339,14 +424,14 @@ class Executor:
             stale_at=stale_at,
         )
         published = self._publish_result(result)
+        task_id = task["task_id"]
+        # `publish_forever` only returns False if the executor is being stopped;
+        # in every other case (including long ntfy outages) we don't get here
+        # until the POST succeeded, so marking seen is always safe.
+        now_mono = time.monotonic()
         with self._state_lock:
-            task_id = task["task_id"]
             self.running_tasks.discard(task_id)
-            # `publish_forever` only returns False if the executor is being
-            # stopped — in every other case (including long ntfy outages)
-            # we don't get here until the POST succeeded, so marking seen
-            # is always safe.
-            self.seen_ids.add(task_id)
+            self.seen_ids[task_id] = now_mono
             done = self.worker_done.setdefault(task_id, threading.Event())
             done.set()
         self.log(f"finalize {task['task_id']} status={status} exit={exit_code} published={published}")

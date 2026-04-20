@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.2"
+PACKAGE_VERSION = "v0.2.1"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,7 +21,16 @@ class Settings:
     ntfy_server_url: str = "https://ntfy.sh"
     ntfy_forward_topic: str = "agent-forward-285"
     ntfy_backward_topic: str = "agent-backward-285"
-    ntfy_poll_since: str = "2h"
+    # Shorter polling window — bounds the per-poll payload size and sidesteps
+    # the 2h-boundary ambiguity ("is this task really orphaned or are we just
+    # past the window?"). Any well-formed task envelope this old is already
+    # past its timeout (see _is_expired check) so pulling further back buys us
+    # nothing actionable.
+    ntfy_poll_since: str = "30m"
+    # In-memory seen_ids TTL. Entries older than this are pruned lazily so a
+    # long-running executor does not grow memory without bound. Kept at 2×
+    # the poll window so even a near-edge replay still dedups correctly.
+    seen_ids_ttl_seconds: float = 3600.0
     ntfy_poll_base_seconds: float = 1.0
     ntfy_poll_jitter_growth: float = 1.10
     ntfy_poll_jitter_floor: float = 0.05

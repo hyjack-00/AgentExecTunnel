@@ -74,6 +74,23 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class AckRecord:
+    task_id: str
+    executor_id: str
+    ack_at: str
+    version: str = PACKAGE_VERSION
+
+    def to_envelope(self) -> dict[str, Any]:
+        return {
+            "kind": "ack",
+            "version": self.version,
+            "task_id": self.task_id,
+            "executor_id": self.executor_id,
+            "ack_at": self.ack_at,
+        }
+
+
+@dataclass(frozen=True)
 class ResultRecord:
     task_id: str
     executor_id: str

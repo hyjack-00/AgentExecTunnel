@@ -10,6 +10,18 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 
+# Prefer the host OS trust store for HTTPS verification so corporate-CA and
+# system-root-CA setups "just work" without relying on Python's bundled certs.
+# Soft import: if `truststore` is not installed on this host we silently fall
+# back to urllib's default SSL context.
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:  # pragma: no cover - optional dependency
+    pass
+
+
 @dataclass(frozen=True)
 class NtfyConfig:
     server_url: str = "https://ntfy.sh"
@@ -223,8 +235,16 @@ def wait_for(
     *,
     deadline_monotonic: float,
     cap_seconds: float,
+    match_kind: str | None = None,
     log: Callable[[str], None] = lambda m: None,
 ) -> tuple[dict | None, bool]:
+    """Poll `topic` until an envelope matching `task_id` (and optionally
+    `match_kind`, e.g. "result") arrives, or the deadline is reached.
+
+    `match_kind` guards against sibling envelopes on the same topic with the
+    same task_id — specifically ACK vs result envelopes both share task_id,
+    so the submitter must wait specifically for `kind="result"` and ignore
+    the intermediate `kind="ack"`."""
     base = cfg.poll_base_seconds
     cap_jitter = max(0.0, cap_seconds - base)
     jitter_max = 0.0
@@ -242,8 +262,11 @@ def wait_for(
             _sleep_remaining(base, jitter_max, remaining)
             continue
         for env in envelopes:
-            if env.get("task_id") == task_id:
-                return env, last_poll_ok
+            if env.get("task_id") != task_id:
+                continue
+            if match_kind is not None and env.get("kind") != match_kind:
+                continue
+            return env, last_poll_ok
         jitter_max = _bump_jitter(jitter_max, cfg.poll_jitter_growth, cfg.poll_jitter_floor, cap_jitter)
         remaining = deadline_monotonic - time.monotonic()
         if remaining <= 0:

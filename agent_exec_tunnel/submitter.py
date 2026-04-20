@@ -92,6 +92,7 @@ def wait_for_result(
         task_id,
         deadline_monotonic=deadline,
         cap_seconds=cap,
+        match_kind="result",
     )
     if envelope is None:
         if not last_poll_ok:

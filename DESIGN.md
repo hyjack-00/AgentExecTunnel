@@ -36,6 +36,8 @@ Names are configurable via `Settings.ntfy_forward_topic` / `Settings.ntfy_backwa
 
 ### Envelopes
 
+Three `kind`s on the backward topic — the submitter filters by `kind="result"` specifically, so ACK and result envelopes with the same `task_id` do not confuse the wait path.
+
 Task envelope (published to the forward topic):
 
 ```json
@@ -52,6 +54,20 @@ Task envelope (published to the forward topic):
   "metadata": {}
 }
 ```
+
+ACK envelope (published to the backward topic by the executor **before** it spawns the worker subprocess):
+
+```json
+{
+  "kind": "ack",
+  "version": "v0.2.1",
+  "task_id": "...",
+  "executor_id": "host:pid",
+  "ack_at": "<iso>"
+}
+```
+
+The ACK exists only for crash-recovery dedup on executor restart. See "Dedup model" below.
 
 Result envelope (published to the backward topic):
 
@@ -95,19 +111,23 @@ Result envelope (published to the backward topic):
 
 One executor process:
 
-1. **Main thread** enters `poll_loop`. Each iteration does one `poll_since` GET (non-blocking in practice since `poll=1` returns immediately). For each envelope whose `task_id` passes `is_seen`, main thread calls `_handle_task_envelope` which claims the `task_id` into `running_tasks` (under lock), validates `timeout_seconds` / `command`, then `threading.Thread(target=_run_task_worker).start()` and returns.
-2. **Worker thread** runs `subprocess.Popen(shell=True, ...)` and polls the child via `process.poll()` plus a `deadline_at` check. On child exit or deadline it calls `_finalize_result`.
+1. **Main thread** enters `poll_loop`. Each iteration does one `poll_since` GET (non-blocking in practice since `poll=1` returns immediately). For each envelope whose `task_id` passes `is_seen` and the expiry guard, main thread calls `_handle_task_envelope` which claims the `task_id` into `running_tasks` (under lock), validates `timeout_seconds` / `command`, then `threading.Thread(target=_run_task_worker).start()` and returns.
+2. **Worker thread** publishes an **ACK envelope** to the backward topic via `publish_forever` (blocks until accepted), then runs `subprocess.Popen(shell=True, ...)` and polls the child via `process.poll()` plus a `deadline_at` check. On child exit or deadline it calls `_finalize_result`.
 3. `_finalize_result` calls `_publish_result`, which wraps `publish_forever` — the **worker** thread blocks here until the backward POST succeeds (or the executor is stopped). Only after publish success does the worker mark `task_id` into `seen_ids` and clear `running_tasks`.
 
-Consequence: an ntfy backward-topic outage blocks just the affected workers, not the polling main thread. New envelopes can keep being dispatched to new worker threads concurrently.
+Consequence: an ntfy backward-topic outage blocks just the affected workers, not the polling main thread. New envelopes can keep being dispatched to new worker threads concurrently. Because ACK is published before the subprocess is spawned, a mid-task executor crash that precedes a result publish still leaves a visible ACK; a restart within the 30-minute window seeds `seen_ids` with that ACK's task_id and skips re-execution.
 
 ### Dedup model
 
-- `seen_ids`: task_ids whose result envelope has already been successfully published.
-- `running_tasks`: task_ids with a live worker thread (publish not yet acknowledged).
+- `seen_ids`: `dict[task_id, monotonic_insert_time]`. A task_id lands here when **either** an ACK **or** a result envelope has been successfully published. Pruned lazily by `_maybe_prune_seen_ids` (called from `_is_seen`, bounded to run at most once per minute) so entries older than `Settings.seen_ids_ttl_seconds` (default 1h = 2× the poll window) are dropped.
+- `running_tasks`: task_ids with a live worker thread (publish not yet completed).
 - `_is_seen(task_id) = task_id in seen_ids or task_id in running_tasks`.
-- `poll_loop` queries `is_seen` under the executor's `_state_lock` (via the callback). The callback is intentionally a callable, not a raw set, so `poll_loop` and worker threads cannot race on an unlocked set.
-- On startup, `seed_seen_ids(backward_topic)` pulls every `task_id` visible in the 2h replay window and pre-fills `seen_ids` — restart does not re-run already-finished tasks.
+- `poll_loop` queries `is_seen` via a callback under the executor's `_state_lock`. The callback is intentionally a callable, not a raw set, so the poll thread and worker threads cannot race on an unlocked set.
+- On startup, `seed_seen_ids(backward_topic)` pulls every envelope (ACK or result, any `kind`) visible in the 30-minute replay window and pre-fills `seen_ids`. This closes the **crash-mid-task** re-run window: if the previous executor instance crashed after publishing an ACK but before publishing a result, the restarted executor sees the ACK and will not re-dispatch that task_id.
+
+### Boundary guard (expired envelopes)
+
+Separate from dedup, there is a **per-envelope expiry check**. When the poll thread sees a task envelope whose `created_at + timeout_seconds` is already in the past, `_handle_task_envelope` marks the task_id as seen and returns without dispatching. This covers the near-window-edge race where a task envelope lingers in the 30-minute replay window but the backward topic happens to carry neither an ACK nor a result for it (often because ntfy was rate-limited or briefly partitioned when the original execution was attempted). Running a long-past-deadline task is useless (the submitter has already given up) and slightly dangerous, so the executor simply skips it.
 
 ### Polling cadence
 
@@ -131,12 +151,13 @@ The executor's idle cadence is `base_seconds + random.uniform(0, jitter_max)`.
 
 Executor-only hosts (the common deployment) do **not** need the `agent_forward` clone. `executor/run_executor.py` emits a preflight warning when `agent_forward/.git` is missing but does not exit — the message plane is already up.
 
-## Known MVP trade-offs (deferred to post-v0.2)
+## Known MVP trade-offs (deferred)
 
-- **No ACK**: mid-task executor crash + restart within 2h may re-run the task once.
+- **ACK window** (v0.2.1): ACK is published before the subprocess is spawned, which narrows but does not close the re-run window. If the executor crashes between claiming into `running_tasks` (main thread) and the ACK POST being accepted (worker thread), a restart will re-dispatch the task. In normal operation this window is sub-second.
 - **No auth**: topic names are world-readable / world-writable. Anyone who guesses `agent-forward-285` can post a task envelope; the executor will run it via `subprocess.Popen(shell=True, ...)` with full host environment. Add HMAC signing or a private ntfy instance for production.
 - **No streaming**: stdout/stderr are published as 4KB tails at completion. A large-log task should arrange out-of-band transport (log to file, then upload via `submit_files.py`).
 - **`shell=True`**: inherits the full process environment, cwd, and SSH config to the task subprocess. Intentional (it's a tunnel), but pairs with the auth gap above to form a documented trust boundary.
+- **TLS trust store**: `ntfy_transport` soft-imports `truststore` and `inject_into_ssl()` so system-CA chains are honored. If `truststore` is not installed, urllib's default (Python-bundled CAs) is used — typically fine but may miss corporate or custom CAs.
 
 ## Availability monitoring
 

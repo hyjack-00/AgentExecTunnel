@@ -139,6 +139,7 @@ def _poll_for_result(task_id: str, timeout_seconds: int) -> dict:
         task_id,
         deadline_monotonic=deadline,
         cap_seconds=cap,
+        match_kind="result",
     )
     if envelope is None:
         timeout_exit(timeout_seconds, task_id, ntfy_unreachable=not last_poll_ok)
