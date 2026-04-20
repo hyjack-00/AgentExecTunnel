@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 import urllib.error
@@ -38,6 +39,29 @@ class NtfyConfig:
 
 class NtfyPublishError(RuntimeError):
     pass
+
+
+def _supports_color() -> bool:
+    return os.environ.get("TERM", "").lower() not in ("", "dumb")
+
+
+def _retry_color(attempt: int) -> str:
+    if not _supports_color():
+        return ""
+    if attempt >= 6:
+        return "\033[1;31m"
+    if attempt >= 4:
+        return "\033[31m"
+    if attempt >= 2:
+        return "\033[33m"
+    return "\033[2;33m"
+
+
+def _colorize_retry(message: str, attempt: int) -> str:
+    prefix = _retry_color(attempt)
+    if not prefix:
+        return message
+    return f"{prefix}{message}\033[0m"
 
 
 def _retry_after_seconds(exc: BaseException, default: float) -> float:
@@ -199,18 +223,27 @@ def poll_loop(
     base = cfg.poll_base_seconds
     cap_jitter = max(0.0, cap_seconds - base)
     jitter_max = 0.0
+    failure_streak = 0
     while not stop():
         try:
             envelopes = poll_since(cfg, topic)
             poll_ok = True
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            log(f"ntfy poll error topic={topic} error={exc}")
+            failure_streak += 1
+            wait = base + jitter_max / 2
+            log(
+                _colorize_retry(
+                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{wait:.1f}s",
+                    failure_streak,
+                )
+            )
             poll_ok = False
         if not poll_ok:
             # Outage: grow the jitter so we don't DoS a flaky ntfy.sh.
             jitter_max = _bump_jitter(jitter_max, cfg.poll_jitter_growth, cfg.poll_jitter_floor, cap_jitter)
             _sleep_remaining(base, jitter_max, None)
             continue
+        failure_streak = 0
         new_envelopes = [
             env for env in envelopes
             if isinstance(env.get("task_id"), str) and not is_seen(env["task_id"])
@@ -249,6 +282,7 @@ def wait_for(
     cap_jitter = max(0.0, cap_seconds - base)
     jitter_max = 0.0
     last_poll_ok = True
+    failure_streak = 0
     while True:
         remaining = deadline_monotonic - time.monotonic()
         if remaining <= 0:
@@ -256,8 +290,16 @@ def wait_for(
         try:
             envelopes = poll_since(cfg, topic)
             last_poll_ok = True
+            failure_streak = 0
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            log(f"ntfy poll error topic={topic} error={exc}")
+            failure_streak += 1
+            wait = min(remaining, base + jitter_max / 2)
+            log(
+                _colorize_retry(
+                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{wait:.1f}s",
+                    failure_streak,
+                )
+            )
             last_poll_ok = False
             _sleep_remaining(base, jitter_max, remaining)
             continue
