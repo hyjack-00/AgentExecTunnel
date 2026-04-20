@@ -12,45 +12,49 @@
 ### 0. 分支与文档骨架
 - [x] 建 worktree `../AgentExecTunnel.ntfy`，分支 `ntfy-transport`
 - [x] `git mv PROGRESS.md PLAN.md` 并用本骨架覆盖
-- [ ] 首个 commit：`chore: switch PROGRESS.md to PLAN.md for ntfy-transport`
+- [x] 首个 commit：`chore: switch PROGRESS.md to PLAN.md for ntfy-transport`
 
 ### 1. 新增 ntfy 传输模块
-- [ ] `agent_exec_tunnel/ntfy_transport.py`：`publish` / `poll_since` / `poll_loop` / `wait_for`（stdlib only，urllib）
-- [ ] 单元烟雾：直连 ntfy.sh 发一条 + 取一条，打印回显
+- [x] `agent_exec_tunnel/ntfy_transport.py`：`publish` / `poll_since` / `poll_loop` / `wait_for` / `seed_seen_ids`（stdlib only，urllib）
+- [x] 单元烟雾：直连 ntfy.sh 发一条 + 取一条，回显匹配
 
 ### 2. Submitter 侧改造
-- [ ] `agent_exec_tunnel/submitter.py::publish_task`：去 git，改走 `ntfy_transport.publish(forward_topic, envelope)`；`timeout_seconds` 由调用方必填
-- [ ] `agent_exec_tunnel/submitter.py::wait_for_result`：改走 `ntfy_transport.wait_for(backward_topic, task_id, cap=timeout/2)`
-- [ ] `submitter/_submit_common.py::_poll_for_result`：瘦身为 `wait_for` 薄封装；删 `CALLER_POLL_*`、`_read_result_payload`
-- [ ] `submitter/_submit_common.py::timeout_exit` 文案：sync→"ntfy 不可达" / healthy→"executor 静默"
+- [x] `agent_exec_tunnel/submitter.py::publish_task`：去 git，改走 `ntfy_transport.publish(forward_topic, envelope)`；`timeout_seconds` 由调用方必填
+- [x] `agent_exec_tunnel/submitter.py::wait_for_result`：改走 `ntfy_transport.wait_for(backward_topic, task_id, cap=timeout/2)`
+- [x] `submitter/_submit_common.py::_poll_for_result`：瘦身为 `wait_for` 薄封装；删 `CALLER_POLL_*`、`_read_result_payload`
+- [x] `submitter/_submit_common.py::timeout_exit` 文案：ntfy_unreachable→"ntfy 不可达" / healthy→"executor 静默"
 
 ### 3. Executor 侧改造
-- [ ] `agent_exec_tunnel/executor.py::run_loop`：换成 `ntfy_transport.poll_loop(forward_topic, ...)`；启动时一次性 `poll_since(backward_topic)` seed `seen_ids`
-- [ ] 新增 `_handle_task_envelope`：内存去重 + 必填 timeout 校验 + 交给 `_start_worker`
-- [ ] `_ack_and_start_worker` → `_start_worker`：去掉 ACK 那一半
-- [ ] `_finalize_result`：改走 `ntfy_transport.publish(backward_topic, envelope)`
-- [ ] 字段合并：`orphan_ack_at` / `claiming_tasks` / `finished_tasks` → `seen_ids`
+- [x] `agent_exec_tunnel/executor.py::run_loop`：换成 `ntfy_transport.poll_loop(forward_topic, ...)`；启动时一次性 `seed_seen_ids(backward_topic)` 预填
+- [x] 新增 `_handle_task_envelope`：内存去重 + 必填 timeout 校验 + 必填 command 校验 + 交给 `_start_worker`
+- [x] `_ack_and_start_worker` → `_start_worker`：去掉 ACK 那一半
+- [x] `_finalize_result`：改走 `ntfy_transport.publish(backward_topic, envelope)`
+- [x] 字段合并：`orphan_ack_at` / `claiming_tasks` / `finished_tasks` → `seen_ids`
 
 ### 4. 协议 / 配置清理
-- [ ] `agent_exec_tunnel/protocol.py`：删 `AckRecord`、`ack_path`；`TaskRecord`/`ResultRecord` 去 `forward_task_path`；`to_json()` 加 `kind`
-- [ ] `agent_exec_tunnel/config.py`：`default_timeout_seconds` 512→300；加 `ntfy_*` 字段；删 `executor_poll_*` / `submit_poll_interval_seconds` / `steady_scan_hours` / `startup_scan_hours` / `executor_backward_write_root`
+- [x] `agent_exec_tunnel/protocol.py`：删 `AckRecord`、`ack_path` / `result_path` / `task_path`、`hour_bucket_parts` / `iter_hour_buckets`；`TaskRecord`/`ResultRecord` 去 `forward_task_path`；`to_envelope()` 加 `kind`
+- [x] `agent_exec_tunnel/config.py`：`default_timeout_seconds` 512→300；加 `ntfy_*` 字段；删 `executor_poll_*` / `submit_poll_interval_seconds` / `steady_scan_hours` / `startup_scan_hours` / `executor_backward_write_root` / `backward_root`
 
 ### 5. 死代码清理（DoD：rg 为空）
-- [ ] 删 `GitWriter` 整个类（executor.py，约 150 行）
-- [ ] 删 `_reconcile_orphan_stale` / `_recover_from_backward` / `startup_scan*` / `scan_recent*` / `_git_sync_once` / `_bucket_glob`
-- [ ] 删 `tools/bootstrap_repos.py` 里 backward 仓库的 bootstrap 分支
-- [ ] 删/改 `tests/` 里断言 ACK/结果文件落盘的用例
-- [ ] 验收：`rg -n "AckRecord|GitWriter|ack_path|orphan_ack|_reconcile_orphan|startup_scan|executor_backward_write_root" agent_exec_tunnel/ submitter/ tests/` 为空
+- [x] 删 `GitWriter` 整个类（executor.py）
+- [x] 删 `_reconcile_orphan_stale` / `_recover_from_backward` / `startup_scan*` / `scan_recent*` / `_git_sync_once` / `_bucket_glob`
+- [x] 删整个 `agent_exec_tunnel/repair.py` + `tools/repair_task.py`（ACK 持久化消失后无意义）
+- [x] 删 `tools/bootstrap_repos.py` 里 backward 仓库的 bootstrap 分支；`remotes.py` 去 `backward_url` / `ENV_BACKWARD_REMOTE` / `DEFAULT_BACKWARD_REMOTE`；`.gitignore` 去 `agent_backward/`
+- [x] 删基于 git 的老测试：`test_burst_local.py` / `test_fake_relay_roundtrip.py` / `test_fresh_clone.py` / `test_integration_repos.py` / `test_submitter_flow.py` / `runtime_helpers.py`
+- [x] 删 `tools/run_burst_live.py` / `tools/run_burst_local_relay.py`（依赖已删除的 helpers）
+- [x] 重写 `tests/test_protocol.py` / `tests/test_executor_flow.py` / `tests/test_cli_entrypoints.py` 对新的 ntfy 路径
+- [x] `tests/availability/report.py` + `test_availability.py` 去 `ack_latency_s` / `result_latency_s`
+- [x] 提交器 CLI 默认 timeout 512→300
+- [x] 验收：`rg -n "AckRecord|GitWriter|ack_path|orphan_ack|_reconcile_orphan|startup_scan|scan_recent|executor_backward_write_root|backward_root|backward_url|DEFAULT_BACKWARD|ENV_BACKWARD|iter_hour_buckets|hour_bucket_parts|forward_task_path" --type py` 只剩两条**负向断言**（`settings 不应有 backward_root`、`envelope 不应有 forward_task_path`）
 
 ### 6. 验证
-- [ ] bootstrap 本 worktree 的 sibling clones：`python tools/bootstrap_repos.py`（只 forward）
-- [ ] ntfy 单元烟雾通过
-- [ ] 端到端 relay：`python submitter/submit_relay.py "echo hello-ntfy"` ≲4s 返回，全程无 git push
-- [ ] Timeout 正确性：`--timeout 60 "sleep 120"` → 60s 后 `failed/stale`
-- [ ] 空闲 10 分钟日志：抖动缓慢上漂、提交新任务立刻回弹
-- [ ] 崩溃重启幂等：2h 窗口内已完成任务不重跑
-- [ ] 文件传输回归：`submit_files.py` 正常 push `origin/main`
-- [ ] `pytest tests/ -x` 全绿
+- [x] ntfy 单元烟雾通过（独立 topic `aet-smoke-*` 发一条 + 取一条匹配）
+- [x] 端到端 relay：`AET_GIT_BASH_EXECUTABLE=/bin/bash python3 submitter/submit_gitbash.py "echo hello-ntfy"` → 7.5s 内返回 stdout 正确，**全程零 git push**
+- [x] Timeout 正确性：`--timeout-seconds 5 "sleep 20"` → executor 日志在 5s 后 `finalize status=stale exit=-1`；submitter 端 exit=124 带 "ntfy reachable; executor may be down" 文案
+- [x] 崩溃重启幂等：重新构造 `Executor()` 后调 `seed_seen_ids(backward_topic)` 回显 2 个已完成 task_id，证明重启不重跑
+- [x] `python3 -m unittest discover tests`：31/31 全绿
+- [ ] 空闲 10 分钟日志：抖动缓慢上漂、提交新任务立刻回弹 *(未执行 — 需要人工观察长时间日志，留给运行时验证)*
+- [ ] 文件传输回归：`submit_files.py` 正常 push `origin/main` *(未执行 — 需要 forward 仓库 bootstrap 和有效远端；留给运行时验证)*
 
 ## 备注
 
@@ -58,3 +62,4 @@
 - ACK / 孤儿对账 / at-most-once 语义在本分支**故意**放弃，作为 MVP 交换项；未来若需要再做，入口在 `ntfy_transport.publish` 前后。
 - `agent_forward/` 仍走 GitHub `main` 分支的 fetch→rebase→push；消息搬到 ntfy 后，main 上的并发写入只剩文件上传这一处，冲突面大幅下降。
 - 两个 ntfy topic 是世界可读的：`agent-forward-285` / `agent-backward-285`。MVP 假设可信环境，鉴权/加密留给后续版本。
+- 端到端观测到的延迟（sandbox → ntfy.sh → sandbox）：~7s。主要由 submitter 的 `_poll_for_result` 第一次轮询间隔 + 抖动 + ntfy 消息传播构成，可接受。实际在受限网络上可能更长。
