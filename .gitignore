@@ -2,9 +2,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
-var/local_remotes/
-var/runtime/
 var/
+
+.codex
+.claude
+.gemini
+
 agent_forward/
 agent_backward/
 .aet-remotes.json
+
