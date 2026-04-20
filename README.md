@@ -42,42 +42,52 @@ The architecture allows multiple submitters to publish into forward concurrently
 
 ## Startup
 
-Fresh-machine first run — three steps, in order:
+The data repos `agent_forward/` and `agent_backward/` are **not** submodules. They are plain sibling clones sitting inside the tunnel checkout and listed in `.gitignore`. They are provisioned by `tools/bootstrap_repos.py`.
+
+Fresh-machine first run — two steps, in order:
 
 ```bash
 git clone <AgentExecTunnel remote> && cd AgentExecTunnel
-git submodule update --init --recursive          # 1. fetch agent_forward / agent_backward
-python3 tools/bootstrap_repos.py                  # 2. verify submodule origins, repair if needed
-python3 executor/run_executor.py                  # 3. start executor
+python3 tools/bootstrap_repos.py                 # 1. clone agent_forward and agent_backward
+python3 executor/run_executor.py                 # 2. start executor
 ```
 
-Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). The submodule remotes listed in `.gitmodules` must be reachable from this machine.
+Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). Bootstrap clones from the defaults in `agent_exec_tunnel/remotes.py`:
+
+- `https://github.com/hyjack-00/agent_forward.git`
+- `https://github.com/hyjack-00/agent_backward.git`
+
+To point at different remotes (private fork, local bare repo for testing, etc.) set env vars or pass CLI flags:
+
+```bash
+AET_FORWARD_REMOTE=... AET_BACKWARD_REMOTE=... python3 tools/bootstrap_repos.py
+# or
+python3 tools/bootstrap_repos.py --forward-url ... --backward-url ... --branch main
+```
+
+An optional `.aet-remotes.json` at the tunnel root is read before falling back to defaults (also gitignored).
 
 ### What can be skipped on subsequent updates
 
 After the first successful bootstrap, routine update on the same machine is just:
 
 ```bash
-git pull
-git submodule update --recursive                  # pick up tunnel-pinned submodule SHAs
+git pull                                          # tunnel-only; does not touch agent_forward/backward
 python3 executor/run_executor.py
 ```
 
-- Skip `--init`: submodules are already initialized; `--recursive` alone is enough to advance them.
-- Skip `bootstrap_repos.py` **unless** one of these changed: `.gitmodules` URLs, the `var/local_remotes/` layout, or the submodule `remote.origin.url` got rewritten. Bootstrap is idempotent, so re-running it is safe but usually a no-op on steady-state machines.
+- Skip `bootstrap_repos.py` unless: data-repo remote URL changed, the data dirs got wiped, or you moved the checkout. Bootstrap is idempotent (re-sync via `fetch + reset --hard`), so re-running it is safe.
 - Skip Python dependency setup entirely — there is none.
+- **Never** run `git submodule ...` against this repo; it no longer uses submodules.
 
 Always needed, even on updates:
 
 - A running executor loop (`executor/run_executor.py`) — it does not survive `git pull` by itself; restart after pulling.
-- Network access to the submodule remotes — the executor does `git fetch` every scan pass.
+- Network access to the data-repo remotes — the executor does `git fetch` every scan pass.
 
-### When a re-bootstrap is actually required
+### Why not submodules
 
-- First clone on a new machine.
-- Switching the submodule origin between GitHub HTTPS and a local bare remote under `var/local_remotes/`.
-- Recovering from a wiped `agent_forward/` or `agent_backward/` working tree.
-- Moving the checkout to a new path where relative submodule origins no longer resolve.
+Submodule pinning is wrong for these two repos: they mutate on **every** task (new commits for task publication, ACK, result), so the tunnel commit would constantly need to bump its submodule SHA, and any runtime commit that was not pushed to the configured remote would produce `not our ref` errors on a new machine. Treating them as ignored sibling clones removes the whole class of ghost-SHA failures.
 
 ## Process
 
@@ -116,15 +126,8 @@ Behavior:
 - one copy runs the executor
 - one copy acts as the submitter-side base clone
 - each submitted task gets its own submitter-side working copy
-- all command / ACK / result traffic still goes through the `agent_forward` / `agent_backward` remotes from `.gitmodules`
-- after the run, the checked-out submodules in this workspace are re-synced to those remotes so you can inspect the latest visible state locally
-
-`python3 tools/bootstrap_repos.py` now also repairs local file-based submodule origins: if a submodule still points at an out-of-repo sibling path, bootstrap rewires it to a repository-local bare remote under `var/local_remotes/`.
-
-The checked-in `.gitmodules` now uses explicit HTTPS URLs:
-
-- `https://github.com/hyjack-00/agent_forward.git`
-- `https://github.com/hyjack-00/agent_backward.git`
+- all command / ACK / result traffic still goes through the `agent_forward` / `agent_backward` remotes resolved from `agent_exec_tunnel/remotes.py` (env vars / `.aet-remotes.json` / defaults)
+- after the run, the local `agent_forward/` and `agent_backward/` clones in this workspace are re-synced to those remotes so you can inspect the latest visible state locally
 
 On non-Windows hosts, `submit_gitbash.py` can still be used by overriding the executable path:
 
@@ -141,7 +144,7 @@ Behavior:
 - it does not start any executor locally
 - it creates one isolated submitter-side base clone under a temp dir
 - each launched task gets its own submitter-side tunnel clone
-- traffic still goes through the live `agent_forward` / `agent_backward` remotes from `.gitmodules`
+- traffic still goes through the live `agent_forward` / `agent_backward` remotes resolved from `agent_exec_tunnel/remotes.py`
 - it measures submit/result outcomes from the caller side only
 
 ## Synchronization
@@ -158,10 +161,10 @@ Even though forward and backward are single-purpose data repositories, synchroni
 
 Relay and ssh are different submit wrappers, but they are the same runtime class of work for executor: one claimed task becomes one executed command.
 
-The checked-out submodule working directories used by the default CLI settings are:
+The repo-local data directories used by the default CLI settings are:
 
-- `agent_forward/`
-- `agent_backward/`
+- `agent_forward/` (gitignored, cloned by bootstrap)
+- `agent_backward/` (gitignored, cloned by bootstrap)
 
 ## Working Clone Rule
 
@@ -184,10 +187,10 @@ Use one executor clone only:
 
 This repository's local integration coverage uses that exact separation.
 
-If you launch both `submitter/*.py` and `executor/run_executor.py` directly against the checked-out `agent_forward/` and `agent_backward/` submodules in this same repo, they will share one git working tree per data repo. That can race because both sides call sync operations that do `fetch + checkout/reset`, and both sides also create commits. So:
+If you launch both `submitter/*.py` and `executor/run_executor.py` directly against the repo-local `agent_forward/` and `agent_backward/` clones in this same repo, they will share one git working tree per data repo. That can race because both sides call sync operations that do `fetch + checkout/reset`, and both sides also create commits. So:
 
 - same remotes: supported
-- same checked-out submodule working tree: not supported for concurrent submit + execute
+- same repo-local data-repo working tree: not supported for concurrent submit + execute
 - multiple executors against one remote pair: not supported
 
 For local same-machine diagnostics without that conflict, use `tools/run_burst_local_relay.py`, which gives executor and submitter separate working copies against the same remotes.

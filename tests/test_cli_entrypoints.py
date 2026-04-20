@@ -24,7 +24,7 @@ _bootstrap_spec.loader.exec_module(bootstrap_repos)
 
 
 class CliEntrypointTests(unittest.TestCase):
-    def test_default_settings_use_repo_local_submodules(self) -> None:
+    def test_default_settings_use_repo_local_data_dirs(self) -> None:
         settings = default_settings()
         self.assertEqual(settings.tunnel_root, ROOT)
         self.assertEqual(settings.workspace_root, ROOT)
@@ -76,26 +76,54 @@ class CliEntrypointTests(unittest.TestCase):
         clear_ack.assert_not_called()
         write_failed.assert_called_once_with("task-2", exit_code=7, stderr_tail="boom")
 
-    def test_bootstrap_helper_localizes_missing_file_remote(self) -> None:
+    def test_bootstrap_ensure_repo_clones_from_remote_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tunnel = Path(tmp) / "tunnel"
-            repo = tunnel / "agent_forward"
-            repo.mkdir(parents=True)
-            bootstrap_repos.run(["git", "init", "--initial-branch=main"], cwd=repo)
-            bootstrap_repos.run(["git", "config", "user.email", "agent@example.com"], cwd=repo)
-            bootstrap_repos.run(["git", "config", "user.name", "agent"], cwd=repo)
-            (repo / "README.md").write_text("demo\n", encoding="utf-8")
-            bootstrap_repos.run(["git", "add", "README.md"], cwd=repo)
-            bootstrap_repos.run(["git", "commit", "-m", "init"], cwd=repo)
-            bootstrap_repos.run(["git", "remote", "add", "origin", str(Path(tmp) / "missing_forward")], cwd=repo)
+            tmp_root = Path(tmp)
+            origin_bare = tmp_root / "agent_forward.git"
+            seed = tmp_root / "seed_forward"
+            seed.mkdir()
+            bootstrap_repos.run(["git", "init", "--bare", "--initial-branch=main", str(origin_bare)])
+            bootstrap_repos.run(["git", "init", "--initial-branch=main"], cwd=seed)
+            bootstrap_repos.run(["git", "config", "user.email", "agent@example.com"], cwd=seed)
+            bootstrap_repos.run(["git", "config", "user.name", "agent"], cwd=seed)
+            (seed / "README.md").write_text("demo\n", encoding="utf-8")
+            bootstrap_repos.run(["git", "add", "README.md"], cwd=seed)
+            bootstrap_repos.run(["git", "commit", "-m", "init"], cwd=seed)
+            bootstrap_repos.run(["git", "push", str(origin_bare), "main"], cwd=seed)
 
-            remote, mode = bootstrap_repos.ensure_repo_local_origin(repo, "agent_forward", tunnel)
-
-            self.assertEqual(mode, "localized")
-            self.assertEqual(remote, tunnel / "var" / "local_remotes" / "agent_forward.git")
+            target = tmp_root / "tunnel" / "agent_forward"
+            status = bootstrap_repos.ensure_repo(target, str(origin_bare), "main")
+            self.assertEqual(status, "cloned")
             self.assertEqual(
-                bootstrap_repos.git_output(repo, "config", "--get", "remote.origin.url"),
-                str(remote),
+                bootstrap_repos.git_output(target, "config", "--get", "remote.origin.url"),
+                str(origin_bare),
+            )
+
+    def test_bootstrap_ensure_repo_rewires_origin_when_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            old_bare = tmp_root / "old.git"
+            new_bare = tmp_root / "new.git"
+            bootstrap_repos.run(["git", "init", "--bare", "--initial-branch=main", str(old_bare)])
+            bootstrap_repos.run(["git", "init", "--bare", "--initial-branch=main", str(new_bare)])
+            seed = tmp_root / "seed"
+            seed.mkdir()
+            bootstrap_repos.run(["git", "init", "--initial-branch=main"], cwd=seed)
+            bootstrap_repos.run(["git", "config", "user.email", "agent@example.com"], cwd=seed)
+            bootstrap_repos.run(["git", "config", "user.name", "agent"], cwd=seed)
+            (seed / "README.md").write_text("demo\n", encoding="utf-8")
+            bootstrap_repos.run(["git", "add", "README.md"], cwd=seed)
+            bootstrap_repos.run(["git", "commit", "-m", "init"], cwd=seed)
+            bootstrap_repos.run(["git", "push", str(old_bare), "main"], cwd=seed)
+            bootstrap_repos.run(["git", "push", str(new_bare), "main"], cwd=seed)
+
+            target = tmp_root / "tunnel" / "agent_forward"
+            bootstrap_repos.ensure_repo(target, str(old_bare), "main")
+            status = bootstrap_repos.ensure_repo(target, str(new_bare), "main")
+            self.assertEqual(status, "synced")
+            self.assertEqual(
+                bootstrap_repos.git_output(target, "config", "--get", "remote.origin.url"),
+                str(new_bare),
             )
 
     def test_repo_local_data_repos_do_not_ignore_runtime_paths(self) -> None:

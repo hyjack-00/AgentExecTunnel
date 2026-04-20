@@ -1,8 +1,0 @@
-[submodule "agent_forward"]
-	path = agent_forward
-	url = https://github.com/hyjack-00/agent_forward.git
-	branch = main
-[submodule "agent_backward"]
-	path = agent_backward
-	url = https://github.com/hyjack-00/agent_backward.git
-	branch = main

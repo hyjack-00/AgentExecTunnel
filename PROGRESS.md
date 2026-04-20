@@ -56,7 +56,11 @@
 - [x] Rework executor into asymmetric dispatcher + worker + single git writer model
 - [x] Add whole-`AgentExecTunnel` dual-checkout communication coverage
 - [x] Document fresh-machine startup sequence and what can be skipped on subsequent updates in README
-- [ ] Add executor preflight check that fails fast with a "run bootstrap first" hint when submodules are not initialized
+- [x] Drop git submodules for `agent_forward` / `agent_backward`; move them to gitignored sibling clones provisioned by bootstrap
+- [x] Centralize data-repo remote URLs in `agent_exec_tunnel/remotes.py` with env var / file / default resolution
+- [x] Rewrite `tools/bootstrap_repos.py` to clone-or-sync instead of `git submodule update --init`
+- [x] Update burst runners and fresh-clone test to read remote URLs from the new central config
+- [ ] Add executor preflight check that fails fast with a "run bootstrap first" hint when `agent_forward/` or `agent_backward/` is missing
 
 
 ## Notes
@@ -66,7 +70,7 @@
 - Real local integration is currently covered with separate submitter/executor working clones against the same bare remotes.
 - The current 30-second local burst diagnostic passed with `30/30` completed tasks using separate submitter clones and a fake relay ssh shim.
 - Same remotes are supported; a shared submitter/executor working clone is not the supported deployment model.
-- `.gitmodules` now declares explicit HTTPS origins for both data submodules.
+- `.gitmodules` has been removed; `agent_forward/` and `agent_backward/` are gitignored sibling clones and `tools/bootstrap_repos.py` clones them from `agent_exec_tunnel/remotes.py` (defaults: the public GitHub HTTPS URLs, overridable via `AET_FORWARD_REMOTE` / `AET_BACKWARD_REMOTE` / `.aet-remotes.json` / CLI flags).
 - Submitter pre-publish sync/publish paths use bounded retry; only the executor is intentionally infinite-retry.
 - Executor now follows the intended long-running model: transient git/network failures are retried with backoff and backward writes are serialized through one writer clone.
 - Timeout now finalizes as durable `stale` while the local process may continue detached.

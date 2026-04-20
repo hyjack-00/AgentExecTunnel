@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import configparser
 import json
 import os
 import shutil
@@ -104,18 +103,10 @@ def sync_repo_to_remote_url(repo: Path, remote_url: str, branch: str = "main") -
     run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo)
 
 
-def load_submodule_urls() -> tuple[str, str]:
-    parser = configparser.ConfigParser()
-    if not parser.read(ROOT / ".gitmodules"):
-        raise SystemExit("failed to read .gitmodules")
-    try:
-        forward_remote = parser['submodule "agent_forward"']["url"].strip()
-        backward_remote = parser['submodule "agent_backward"']["url"].strip()
-    except KeyError as exc:
-        raise SystemExit(f"missing submodule url in .gitmodules: {exc}") from exc
-    if not forward_remote or not backward_remote:
-        raise SystemExit("submodule urls in .gitmodules are empty")
-    return forward_remote, backward_remote
+def load_remote_urls() -> tuple[str, str]:
+    from agent_exec_tunnel.remotes import load_remotes
+    remotes = load_remotes(ROOT)
+    return remotes.forward_url, remotes.backward_url
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,9 +138,9 @@ def main() -> None:
         sub_forward = ROOT / "agent_forward"
         sub_backward = ROOT / "agent_backward"
         if not (sub_forward / ".git").exists() or not (sub_backward / ".git").exists():
-            raise SystemExit("agent_forward/ and agent_backward/ submodules must be initialized first")
+            raise SystemExit("agent_forward/ and agent_backward/ not found; run python3 tools/bootstrap_repos.py first")
 
-        forward_remote, backward_remote = load_submodule_urls()
+        forward_remote, backward_remote = load_remote_urls()
 
         print("starting local relay burst via two isolated tunnel repos", flush=True)
         print(f"repo_root={ROOT}", flush=True)

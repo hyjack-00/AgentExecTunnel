@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import configparser
 import json
 import os
 import random
@@ -130,18 +129,10 @@ def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: 
         run(["git", "config", "user.name", "agent"], cwd=repo)
 
 
-def load_submodule_urls() -> tuple[str, str]:
-    parser = configparser.ConfigParser()
-    if not parser.read(ROOT / ".gitmodules"):
-        raise SystemExit("failed to read .gitmodules")
-    try:
-        forward_remote = parser['submodule "agent_forward"']["url"].strip()
-        backward_remote = parser['submodule "agent_backward"']["url"].strip()
-    except KeyError as exc:
-        raise SystemExit(f"missing submodule url in .gitmodules: {exc}") from exc
-    if not forward_remote or not backward_remote:
-        raise SystemExit("submodule urls in .gitmodules are empty")
-    return forward_remote, backward_remote
+def load_remote_urls() -> tuple[str, str]:
+    from agent_exec_tunnel.remotes import load_remotes
+    remotes = load_remotes(ROOT)
+    return remotes.forward_url, remotes.backward_url
 
 
 def parse_args() -> argparse.Namespace:
@@ -165,7 +156,7 @@ def main() -> None:
     args = parse_args()
     schedule = build_schedule(args.tasks, args.duration_seconds, args.seed, args.mode_set)
     out_dir = make_output_dir()
-    forward_remote, backward_remote = load_submodule_urls()
+    forward_remote, backward_remote = load_remote_urls()
 
     print("starting live burst", flush=True)
     print(f"repo_root={ROOT}", flush=True)

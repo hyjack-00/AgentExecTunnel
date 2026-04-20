@@ -5,3 +5,6 @@ __pycache__/
 var/local_remotes/
 var/runtime/
 var/
+agent_forward/
+agent_backward/
+.aet-remotes.json
