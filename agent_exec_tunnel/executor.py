@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import Settings, default_settings
-from .ntfy_transport import NtfyConfig, NtfyPublishError, poll_loop, publish, seed_seen_ids
+from .ntfy_transport import NtfyConfig, poll_loop, publish_forever, seed_seen_ids
 from .protocol import ResultRecord, command_digest, iso_z, utc_now
 from .storage import tail_text
 
@@ -63,6 +63,13 @@ class Executor:
             poll_jitter_floor=self.settings.ntfy_poll_jitter_floor,
         )
 
+    def _is_seen(self, task_id: str) -> bool:
+        """Called from the poll thread. A task is 'seen' if it has already
+        finished (published successfully) or is still in flight on a worker
+        thread (the worker will publish-forever-until-success)."""
+        with self._state_lock:
+            return task_id in self.seen_ids or task_id in self.running_tasks
+
     def log(self, message: str) -> None:
         print(f"[{_log_now()}] {message}", flush=True)
 
@@ -89,11 +96,12 @@ class Executor:
             f"ntfy poll loop starting topic={self.ntfy.forward_topic} "
             f"base={self.ntfy.poll_base_seconds:g}s cap={cap_seconds:g}s"
         )
+
         poll_loop(
             self.ntfy,
             self.ntfy.forward_topic,
             on_envelope=self._handle_task_envelope,
-            seen_ids=self.seen_ids,
+            is_seen=self._is_seen,
             cap_seconds=cap_seconds,
             stop=self._stop_flag.is_set,
             log=self.log,
@@ -105,10 +113,16 @@ class Executor:
         if not isinstance(task_id, str) or not task_id:
             self.log(f"ntfy drop envelope with no task_id: {task!r}")
             return
+        # Atomically claim the task_id into running_tasks. If another envelope
+        # copy arrived in the same poll batch (ntfy replay on the 2h window),
+        # whoever lost the race just returns. We do NOT add to seen_ids here —
+        # seen_ids only flips once the result is successfully published, so
+        # a mid-task executor crash leaves the task eligible for re-run on a
+        # different executor (documented MVP trade-off).
         with self._state_lock:
             if task_id in self.seen_ids or task_id in self.running_tasks:
                 return
-            self.seen_ids.add(task_id)
+            self.running_tasks.add(task_id)
         timeout_seconds = task.get("timeout_seconds")
         if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
             self.log(f"ntfy reject task_id={task_id} invalid timeout_seconds={timeout_seconds!r}")
@@ -126,30 +140,37 @@ class Executor:
             self._publish_envelope_failure(task, f"worker start failed: {exc}")
 
     def _publish_envelope_failure(self, task: dict, reason: str) -> None:
+        # Route through _finalize_result so running_tasks / seen_ids /
+        # pending_results / worker_done all get the same consistent update
+        # a normal-completion path would apply.
         now_iso = iso_z(utc_now())
-        digest = command_digest(
-            task.get("command", ""),
-            task.get("submit_mode", ""),
-            task.get("target_host"),
-        )
-        result = ResultRecord(
-            task_id=task.get("task_id", ""),
-            executor_id=self.executor_id,
+        self._finalize_result(
+            task=task,
             status="failed",
             started_at=now_iso,
             finished_at=now_iso,
             exit_code=-1,
             stdout_tail="",
             stderr_tail=tail_text(reason),
-            command_digest=digest,
+            process_ref=None,
         )
-        self._publish_result(result)
 
-    def _publish_result(self, result: ResultRecord) -> None:
-        try:
-            publish(self.ntfy, self.ntfy.backward_topic, result.to_envelope())
-        except NtfyPublishError as exc:
-            self.log(f"ntfy publish result failed task_id={result.task_id} error={exc}")
+    def _publish_result(self, result: ResultRecord) -> bool:
+        """Publish a result envelope to the backward topic, retrying
+        indefinitely until success (or until the executor is stopped).
+
+        Called from the worker thread, so an ntfy outage blocks just this
+        one worker, not the polling main thread. Each retry attempt builds
+        a fresh urllib Request with `Connection: close`, so no stateful
+        connection pool / TLS session can rot across a long outage.
+        """
+        return publish_forever(
+            self.ntfy,
+            self.ntfy.backward_topic,
+            result.to_envelope(),
+            log=self.log,
+            stop=self._stop_flag.is_set,
+        )
 
     def _start_worker(self, task: dict) -> None:
         task_id = task["task_id"]
@@ -299,7 +320,11 @@ class Executor:
         process_ref: str | None,
         stale_at: str | None = None,
     ) -> None:
-        digest = command_digest(task["command"], task["submit_mode"], task.get("target_host"))
+        digest = command_digest(
+            task.get("command", ""),
+            task.get("submit_mode", ""),
+            task.get("target_host"),
+        )
         result = ResultRecord(
             task_id=task["task_id"],
             executor_id=self.executor_id,
@@ -313,14 +338,18 @@ class Executor:
             process_ref=process_ref,
             stale_at=stale_at,
         )
-        self._publish_result(result)
+        published = self._publish_result(result)
         with self._state_lock:
             task_id = task["task_id"]
             self.running_tasks.discard(task_id)
+            # `publish_forever` only returns False if the executor is being
+            # stopped — in every other case (including long ntfy outages)
+            # we don't get here until the POST succeeded, so marking seen
+            # is always safe.
             self.seen_ids.add(task_id)
             done = self.worker_done.setdefault(task_id, threading.Event())
             done.set()
-        self.log(f"finalize {task['task_id']} status={status} exit={exit_code}")
+        self.log(f"finalize {task['task_id']} status={status} exit={exit_code} published={published}")
 
     @staticmethod
     def _execution_command(task: dict) -> str:

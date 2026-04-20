@@ -19,11 +19,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def preflight_check() -> None:
+    """Warn only. Executor itself no longer reads or writes agent_forward —
+    the clone is needed only if submitters push file uploads through this
+    host via `submitter/submit_files.py`. Executor-only deployments can
+    legitimately run without bootstrapping."""
     settings = default_settings()
     if not (settings.forward_root / ".git").exists():
-        raise SystemExit(
-            f"data repo not found: {settings.forward_root}\n"
-            f"run `python3 tools/bootstrap_repos.py` from {settings.tunnel_root} first"
+        print(
+            f"[preflight] warn: {settings.forward_root} is not a git repo; "
+            f"file-upload payloads will be unavailable to this host. "
+            f"If you use `submitter/submit_files.py`, run "
+            f"`python3 tools/bootstrap_repos.py` from {settings.tunnel_root}.",
+            flush=True,
         )
 
 

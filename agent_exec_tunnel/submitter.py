@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import os
-import random
 import socket
 import time
 from dataclasses import dataclass
 
 from .config import Settings, default_settings
-from .ntfy_transport import NtfyConfig, NtfyPublishError, publish, wait_for
+from .ntfy_transport import NtfyConfig, publish, wait_for
 from .protocol import TaskRecord, iso_z, new_task_id, utc_now
 
 
@@ -30,13 +29,6 @@ def ntfy_config(cfg: Settings) -> NtfyConfig:
         poll_base_seconds=cfg.ntfy_poll_base_seconds,
         poll_jitter_growth=cfg.ntfy_poll_jitter_growth,
         poll_jitter_floor=cfg.ntfy_poll_jitter_floor,
-    )
-
-
-def _retry_delay(cfg: Settings, retries: int) -> float:
-    return min(
-        cfg.network_retry_backoff_seconds * (2 ** (retries - 1)),
-        cfg.network_retry_max_backoff_seconds,
     )
 
 
@@ -68,25 +60,11 @@ def publish_task(
     envelope = task.to_envelope()
     ncfg = ntfy_config(cfg)
 
-    last_error: NtfyPublishError | None = None
-    max_rounds = 3
-    for round_index in range(1, max_rounds + 1):
-        try:
-            publish(ncfg, ncfg.forward_topic, envelope)
-            break
-        except NtfyPublishError as exc:
-            last_error = exc
-            if round_index >= max_rounds:
-                raise
-            delay = _retry_delay(cfg, round_index) + random.uniform(0.0, 0.5)
-            print(
-                f"submit publish round failed round={round_index}/{max_rounds} retry_in={delay}s error={exc}",
-                flush=True,
-            )
-            time.sleep(delay)
-    else:
-        assert last_error is not None
-        raise last_error
+    # `publish()` already does its own bounded retry with exponential backoff
+    # (default 3 attempts). A second outer retry here would multiply into 9
+    # POSTs per submit, which worsens an ntfy outage instead of riding it out.
+    # On NtfyPublishError we propagate directly; callers decide.
+    publish(ncfg, ncfg.forward_topic, envelope)
 
     if emit_submitted:
         print(f"SUBMITTED task_id={resolved_task_id}")
@@ -100,7 +78,11 @@ def wait_for_result(
 ) -> SubmitResult:
     cfg = settings or default_settings()
     timeout = float(result_timeout_seconds or cfg.default_timeout_seconds)
-    deadline = time.monotonic() + timeout
+    # Give the executor time to observe its own timeout and publish a `stale`
+    # envelope before we give up. Executor's deadline clock starts after the
+    # worker thread actually spawns (publish + dispatch + thread-start), so
+    # its stale result lands slightly after `timeout` seconds of wall time.
+    deadline = time.monotonic() + timeout + cfg.submit_timeout_grace_seconds
     ncfg = ntfy_config(cfg)
     cap = timeout / 2.0
 

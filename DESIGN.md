@@ -2,297 +2,142 @@
 
 ## Overview
 
-`AgentExecTunnel` is a dual-repository command tunnel built around two data repos:
+`AgentExecTunnel` is a command tunnel: a submitter CLI publishes a shell command to a remote executor and waits for the final result (exit code + stdout/stderr tails). As of **v0.2** the message plane runs on **ntfy.sh** (one forward topic for task envelopes, one backward topic for result envelopes) instead of a pair of git repos. A single `agent_forward` git repo is still used for **file uploads** (binary assets, source trees) that submit_files.py pushes for tasks to consume.
 
-- `agent_forward`: submit-side publication channel
-- `agent_backward`: executor-side acknowledgement and result channel
+The system is designed for weak networks that flap and recover. Key properties:
 
-The system is designed for weak-network environments where Git connectivity may flap but later recover. The main goal is to keep the executor alive, keep task state durable, and avoid shared-worktree corruption.
+- Submitter sends one POST, then polls GET. No state is committed locally.
+- Executor runs a single long-running poll loop on the main thread; each claimed task runs on its own worker thread; the worker publishes the result envelope itself.
+- Transport failures are either bounded (forward publish — caller decides how to respond) or infinite (backward publish — worker blocks until success, because dropping a finished result is worse than blocking).
+- Dedup is in-memory, keyed on `task_id`, seeded from a 2h replay of the backward topic on executor startup so a restart does not re-run tasks whose results are already visible.
 
 ## Goals
 
-- Support multiple concurrent submitters publishing tasks into one forward repo
-- Keep one long-running executor alive across transient Git and network failures
-- Make task claim and task completion visible through durable Git commits
-- Avoid running submitter and executor in the same Git worktree
-- Keep the protocol simple: publish task, claim with ACK, publish final result
+- Accept multiple concurrent submitters publishing to the forward topic
+- Keep one long-running executor alive through transient ntfy outages
+- Never silently drop a finalized result
+- Keep the protocol surface small: publish a task envelope, publish a result envelope
 
 ## Non-Goals
 
-- Protocol-level streaming output
-- Multi-executor coordination on the same forward/backward remote pair
-- Shared-worktree submitter/executor deployment
-- Strong exactly-once guarantees across multiple executors
+- Protocol-level streaming (stdout/stderr are 4KB tails at the end)
+- Strong exactly-once execution (MVP accepts one re-run on mid-task executor crash within the 2h replay window)
+- Authentication / encryption on the ntfy topics (MVP assumes trusted environment; world-readable topic)
+- Multi-executor coordination against the same topic pair (documented single-executor constraint)
 
 ## Architecture
 
-### Repository Roles
+### Topics
 
-- Submitter writes `agent_forward`
-- Submitter reads `agent_backward`
-- Executor reads `agent_forward`
-- Executor writes `agent_backward`
+- `agent-forward-285` (default) — submitter → executor; carries a `kind:"task"` envelope per published command.
+- `agent-backward-285` (default) — executor → submitter; carries a `kind:"result"` envelope per finalized task.
 
-Terminal task truth is always in `agent_backward`.
+Names are configurable via `Settings.ntfy_forward_topic` / `Settings.ntfy_backward_topic`; server URL via `Settings.ntfy_server_url`.
 
-### Runtime Components
+### Envelopes
 
-- `submitter/*.py`
-  - build relay or SSH command wrapper
-  - sync repos before publish
-  - publish task
-  - poll only for final result
-- `executor/run_executor.py`
-  - runs the long-lived executor loop
-  - scans forward for claimable tasks
-- `agent_exec_tunnel/executor.py`
-  - dispatcher logic
-  - durable ACK path
-  - async worker lifecycle
-  - single backward writer
-- `agent_exec_tunnel/storage.py`
-  - Git sync / commit / push primitives
-- `agent_exec_tunnel/remotes.py`
-  - data-repo URL resolution (env / file / defaults)
-- `tools/bootstrap_repos.py`
-  - clone or sync `agent_forward/` and `agent_backward/` next to the tunnel checkout
-- `tools/run_burst_local_relay.py`
-  - two isolated whole-repo local integration pressure test
-- `tools/run_burst_live.py`
-  - submit-pressure tool against an already-running remote executor
+Task envelope (published to the forward topic):
 
-### End-to-End Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as Submitter
-    participant F as agent_forward
-    participant B as agent_backward
-    participant E as Executor
-    participant P as Child process
-
-    S->>F: sync forward
-    S->>B: sync backward
-    S->>F: write task + commit + push
-    Note over S: print SUBMITTED
-
-    E->>F: sync + scan
-    alt task is claimable
-        E->>B: write ACK + push
-        E->>P: start task
-        P-->>E: exit or deadline
-        E->>B: write final/stale result + push
-    else task already claimed or finished
-        Note over E: skip task
-    end
-
-    loop until caller timeout or result exists
-        S->>B: sync backward
-        B-->>S: final result or no result yet
-    end
+```json
+{
+  "kind": "task",
+  "version": "v0.2",
+  "task_id": "<utc-compact>-<sha1-8><rand-16>",
+  "created_at": "<iso>",
+  "submitter_id": "host:pid",
+  "submit_mode": "relay|ssh",
+  "target_host": "<host or null>",
+  "command": "...",
+  "timeout_seconds": 300,
+  "metadata": {}
+}
 ```
 
-## Repository Layout
+Result envelope (published to the backward topic):
 
-### Forward
-
-- `tasks/YYYY/MM/DD/HH/<task_id>.json`
-- `files/<namespace>/...`
-
-### Backward
-
-- `acks/YYYY/MM/DD/HH/<task_id>.json`
-- `results/YYYY/MM/DD/HH/<task_id>.json`
-
-### Repo-Local Data Directories
-
-`agent_forward/` and `agent_backward/` sit inside the tunnel checkout but are **not** git submodules — they are gitignored sibling clones provisioned by `tools/bootstrap_repos.py`. They mutate on every task publication / ACK / result, so pinning their SHAs under a submodule parent would produce constant ghost-SHA drift. Remote URL resolution lives in `agent_exec_tunnel/remotes.py` (env vars → `.aet-remotes.json` → built-in defaults).
-
-## Task State Model
-
-A task has exactly three observable states. The backward repo is the only source of truth for which one the task is in.
-
-| State | Backward signature | Meaning |
-| --- | --- | --- |
-| `unclaimed` | no ACK, no result | scan sees a publishable task, no executor has taken it yet |
-| `running` | ACK exists, no result | an executor has taken it; it is either actively executing or orphaned from a prior executor run |
-| terminal: `done` / `failed` / `stale` | result exists | one result record is durably committed; no further transitions |
-
-The submitter never observes `running`; it polls only for the terminal record.
-
-### Transitions
-
-```mermaid
-stateDiagram-v2
-    [*] --> unclaimed: submitter publishes task
-    unclaimed --> running: executor writes ACK (blocking)
-    running --> done: worker exit code 0
-    running --> failed: worker exit code != 0
-    running --> stale: ACK age > task timeout
-    done --> [*]
-    failed --> [*]
-    stale --> [*]
+```json
+{
+  "kind": "result",
+  "version": "v0.2",
+  "task_id": "...",
+  "executor_id": "host:pid",
+  "status": "done|failed|stale",
+  "started_at": "...", "finished_at": "...",
+  "exit_code": 0,
+  "stdout_tail": "...≤4KB...",
+  "stderr_tail": "...≤4KB...",
+  "command_digest": "sha256:...",
+  "process_ref": "pid:12345",
+  "stale_at": "<iso or null>"
+}
 ```
 
-Only the `unclaimed -> running` edge is synchronous from the main loop's perspective: the dispatcher will not spawn a worker until the ACK commit is durable. All other edges are published by workers or by main-loop reconciliation, and the main loop does not block on them.
+`task_id` is the sole dedup key. `timeout_seconds` is authoritative from the submitter; the executor rejects any envelope missing or with a non-positive value and publishes a `failed` result back.
 
-### Main-Loop Reconciliation
+### Runtime components
 
-Each scan pass classifies every visible forward task into one of the three states by looking at backward, then:
+- `agent_exec_tunnel/ntfy_transport.py`
+  - `publish(cfg, topic, envelope)` — bounded POST with `publish_max_attempts` retries and `Retry-After` backoff; raises `NtfyPublishError` on final failure. Used by the submitter.
+  - `publish_forever(cfg, topic, envelope, ...)` — infinite retry with exponential backoff capped at 30s, honoring `Retry-After`. Each attempt builds a fresh `Request` with `Connection: close` so no pooled TCP/TLS session can rot across long outages. Used by the executor's worker threads for result publication.
+  - `poll_since(cfg, topic, since)` — one-shot `GET /{topic}/json?poll=1&since={since}`, returns the list of parsed envelopes.
+  - `poll_loop(cfg, topic, on_envelope, is_seen, cap_seconds, ...)` — polls the topic forever, 1s base with upward jitter capped at `cap_seconds`; dispatches new envelopes synchronously via `on_envelope`. Dedup is via the caller-supplied `is_seen(task_id) -> bool` callback — the caller is responsible for any locking around its dedup state.
+  - `wait_for(cfg, topic, task_id, deadline_monotonic, cap_seconds)` — submitter-side variant that exits the moment an envelope matching `task_id` arrives.
+  - `seed_seen_ids(cfg, topic)` — one-time prime of the dedup set from the 2h replay window (used by the executor on startup).
+- `agent_exec_tunnel/submitter.py` — `publish_task` / `wait_for_result` / `submit_task` + `ntfy_config` helper.
+- `agent_exec_tunnel/executor.py` — `Executor` class. Main thread runs `run_loop`; worker threads run `_run_task_worker` and call `_finalize_result → _publish_result → publish_forever`.
+- `agent_exec_tunnel/protocol.py` — `TaskRecord` / `ResultRecord` dataclasses with `to_envelope()`; `new_task_id()` (64-bit jitter).
+- `agent_exec_tunnel/config.py` — `Settings` dataclass including all `ntfy_*` knobs plus `submit_timeout_grace_seconds` (see below).
+- `submitter/_submit_common.py` — shell wrappers + `submit_and_wait(label, command, mode, timeout)` used by the four `submit_{gitbash,powershell}[_ssh].py` CLIs.
+- `submitter/submit_files.py` — file upload: `git_sync → copy → git_commit_push` on `agent_forward`. Only code path that still touches git.
+- `tools/bootstrap_repos.py` — clone / sync `agent_forward` for hosts that push files.
 
-- `unclaimed`: take the `unclaimed -> running` edge (ACK + spawn worker)
-- `running` with a live in-memory worker: do nothing, the worker will finalize
-- `running` without a live worker (orphan from a crashed executor run): compare ACK age to the task's own `timeout_seconds`. If exceeded, write a durable `stale` result; otherwise leave it alone and re-check next pass.
-- terminal: skip
+### Executor concurrency model
 
-There is no fourth "permanently blocked" state. An ACK without an in-memory worker is always either still within the task's deadline (will be revisited) or past the deadline (will be stale-reconciled). Forward's two-hour scan window bounds how far back reconciliation looks — older orphans fall out of the window and stop appearing in scans, which is acceptable.
+One executor process:
 
-## Core Assumptions
+1. **Main thread** enters `poll_loop`. Each iteration does one `poll_since` GET (non-blocking in practice since `poll=1` returns immediately). For each envelope whose `task_id` passes `is_seen`, main thread calls `_handle_task_envelope` which claims the `task_id` into `running_tasks` (under lock), validates `timeout_seconds` / `command`, then `threading.Thread(target=_run_task_worker).start()` and returns.
+2. **Worker thread** runs `subprocess.Popen(shell=True, ...)` and polls the child via `process.poll()` plus a `deadline_at` check. On child exit or deadline it calls `_finalize_result`.
+3. `_finalize_result` calls `_publish_result`, which wraps `publish_forever` — the **worker** thread blocks here until the backward POST succeeds (or the executor is stopped). Only after publish success does the worker mark `task_id` into `seen_ids` and clear `running_tasks`.
 
-- Multiple submitters may race to publish into `agent_forward`
-- Exactly one executor is active for one forward/backward remote pair
-- Submitter and executor run in separate working clones
-- Transient Git failures are expected and must be retried
-- Executor liveness is more important than immediate completion
+Consequence: an ntfy backward-topic outage blocks just the affected workers, not the polling main thread. New envelopes can keep being dispatched to new worker threads concurrently.
 
-## Submit Path
+### Dedup model
 
-1. Build the final relay or SSH command string
-2. Sync `agent_forward`
-3. Sync `agent_backward`
-4. Write task JSON into `agent_forward/tasks/...`
-5. Commit and push task publication
-6. Print `SUBMITTED ...`
-7. Poll `agent_backward/results/...` until result or caller timeout
+- `seen_ids`: task_ids whose result envelope has already been successfully published.
+- `running_tasks`: task_ids with a live worker thread (publish not yet acknowledged).
+- `_is_seen(task_id) = task_id in seen_ids or task_id in running_tasks`.
+- `poll_loop` queries `is_seen` under the executor's `_state_lock` (via the callback). The callback is intentionally a callable, not a raw set, so `poll_loop` and worker threads cannot race on an unlocked set.
+- On startup, `seed_seen_ids(backward_topic)` pulls every `task_id` visible in the 2h replay window and pre-fills `seen_ids` — restart does not re-run already-finished tasks.
 
-Important behavior:
+### Polling cadence
 
-- Submit publish is bounded-retry
-- Submit-side waiting is bounded by caller timeout
-- Caller timeout does not prove the task never ran
+The executor's idle cadence is `base_seconds + random.uniform(0, jitter_max)`.
 
-## Executor Path
+- `base_seconds = 1.0` (`Settings.ntfy_poll_base_seconds`).
+- `jitter_max` grows on each idle poll: `min(cap_jitter, jitter_max * 1.10 + 0.05)`. It is **reset to 0** the instant any new envelope arrives.
+- `cap_jitter = default_timeout_seconds / 2 - base_seconds` (150s − 1s = 149s by default).
+- On a poll error (HTTP / TCP / DNS), jitter grows just like on idle — so a flaky ntfy does not turn into a self-DoS retry loop.
+- With `growth=1.10`, `cap=149s` is reached in roughly 50 consecutive empty polls (several minutes of wall clock). Over an hour of idle, most polls happen near the cap.
 
-1. Startup recovery syncs backward once
-2. Executor scans recent forward task buckets
-3. For each claimable task, publish durable ACK first
-4. Only after durable ACK, start one async worker
-5. Worker runs `execute -> finalize`
-6. Final result is written durably to backward through the single writer
+### Timeout semantics
 
-Important behavior:
+- The envelope's `timeout_seconds` is the executor-side deadline for the subprocess.
+- The submitter's wait deadline is `timeout_seconds + submit_timeout_grace_seconds` (default +15s). The grace absorbs publish → dispatch → worker-spawn skew so the submitter can still observe an executor-authored `stale` envelope when a task times out, instead of racing past it.
+- Final-state failure paths on the submitter: `TimeoutError` with one of two messages — "ntfy reachable; executor may be down or overloaded" or "last ntfy poll failed — server may be unreachable". These distinguish "we saw fresh polls succeed but no result" from "we couldn't even reach ntfy".
 
-- Steady-state dispatch syncs only `agent_forward`
-- Backward writes are serialized
-- Timeout becomes a durable `stale` result
-- The main scan loop does not poll running child state
+## File plane (git)
 
-### Dispatcher / Worker / Writer
+`submitter/submit_files.py` copies a local path into `agent_forward/files/<namespace>/…` and runs `git fetch / rebase / push` on the forward repo. This is the only remaining git write path. Consequence: concurrent `submit_files.py` calls still serialize through the `main` branch's rebase-push loop, but the previous source of contention (task/ACK/result JSON writes) is gone, so the realistic conflict rate drops to the rate of file uploads — small.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as Executor loop
-    participant F as forward clone
-    participant W as git writer
-    participant BW as backward-write clone
-    participant T as task worker
+Executor-only hosts (the common deployment) do **not** need the `agent_forward` clone. `executor/run_executor.py` emits a preflight warning when `agent_forward/.git` is missing but does not exit — the message plane is already up.
 
-    L->>F: sync + scan
-    L->>W: enqueue ACK write
-    W->>BW: commit + push ACK
-    W-->>L: ACK durable
-    L->>T: start async worker
-    Note over T: execute command
-    T->>W: enqueue final/stale result
-    W->>BW: commit + push result
-```
+## Known MVP trade-offs (deferred to post-v0.2)
 
-## Concurrency Model
+- **No ACK**: mid-task executor crash + restart within 2h may re-run the task once.
+- **No auth**: topic names are world-readable / world-writable. Anyone who guesses `agent-forward-285` can post a task envelope; the executor will run it via `subprocess.Popen(shell=True, ...)` with full host environment. Add HMAC signing or a private ntfy instance for production.
+- **No streaming**: stdout/stderr are published as 4KB tails at completion. A large-log task should arrange out-of-band transport (log to file, then upload via `submit_files.py`).
+- **`shell=True`**: inherits the full process environment, cwd, and SSH config to the task subprocess. Intentional (it's a tunnel), but pairs with the auth gap above to form a documented trust boundary.
 
-### Submitter Concurrency
+## Availability monitoring
 
-Concurrent submitters are supported at the remote-repo level.
-
-They are **not** supported in one shared submitter worktree, because publication still uses Git operations that mutate one index / HEAD / lock set.
-
-### Executor Concurrency
-
-The runtime model is intentionally single-executor.
-
-Why:
-
-- startup imports backward ACK/result state once
-- steady-state duplicate suppression then relies on local in-memory sets
-- no distributed lease or compare-and-swap protocol exists across executors
-
-Running multiple executors against the same forward/backward remotes is therefore out of scope.
-
-### Why Shared Worktree Is Unsafe
-
-Submitter and executor both run Git operations that mutate the index, HEAD, and `.git/` lockfiles — `fetch`, `checkout -B`, `reset --hard`, `add`, `commit`, `push`. Running both against one shared working directory races on those lockfiles even though the two roles touch disjoint logical paths (tasks vs acks/results). The conflict is on the worktree, not on the file content. Separate clones against the same remotes are the supported layout; the burst runners under `tools/` demonstrate this.
-
-## Failure Model
-
-### Weak Network
-
-Submitter side:
-
-- publish may fail before a task becomes durable
-- result polling may fail even after the task was accepted
-- caller may time out while the executor later still finishes the task
-
-Executor side:
-
-- fetch/push failures are retried forever with exponential backoff
-- temporary disconnects must not terminate the process
-- writer initialization and steady-state writes both retry until recovery
-
-### Timeout
-
-Task timeout is protocol-visible:
-
-- the executor writes one durable `stale` result
-- the local child process may still continue detached
-- no second final result is later published
-
-### Interrupted Finalize
-
-If the executor is interrupted after ACK is durable but before the terminal result is durable, the task's backward signature is `ACK without result` — the `running` state of the task state machine.
-
-On restart the new main loop does not permanently block these tasks. Each scan pass applies the reconciliation rule from the Task State Model: reclaim the live-worker case, and stale-reconcile the orphan-past-deadline case. There is no separate "ack only" limbo.
-
-## Operational Constraints
-
-### Supported
-
-- Separate submitter and executor clones
-- Same forward/backward remotes
-- Multiple submitters
-- Long-running executor under intermittent network failure
-
-### Unsupported
-
-- Shared submitter/executor worktree
-- Multiple executors on one remote pair
-- Streaming protocol output
-
-## Timing and Retry Policy
-
-- Executor poll backoff: `1s -> 2s -> 4s -> 8s`
-- Executor Git command timeout: `10s`
-- Submitter publish retry: bounded
-- Executor sync/push retry: infinite
-- Default task timeout: `512s`
-
-## Validation Focus
-
-The repository currently emphasizes:
-
-- submit interface tests
-- executor flow tests
-- fresh-clone bootstrap coverage
-- dual-checkout integration coverage
-- local relay burst pressure runs
-- live submit-pressure observation
+`tests/availability/` drives the real submitter CLIs on a randomized schedule (burst + quiet-tick Bernoulli) and writes records into JSONL. `tests/availability/report.py` renders an HTML dashboard with hop cards (by `implies_ok` tag), p50/p95/p99 latency, preview + total stage timings, a 24h hourly SVG heartbeat, per-probe table, and recent failures. See `tests/availability/README.md` for operation and `tests/availability/ssh` for the `local_relay`-mode ssh shim.

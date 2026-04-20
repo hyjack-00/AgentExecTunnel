@@ -1,240 +1,152 @@
 # AgentExecTunnel
 
-Public control repository for the dual-repo execution tunnel.
+Public control repository for the execution tunnel.
 
-The runtime layout is repository-local:
+**v0.2 transport change**: task dispatch and result return now ride on **ntfy.sh** (two fixed topics) instead of two git repos. File uploads still use the `agent_forward` git repo. See [DESIGN.md](DESIGN.md) for the full picture; the v0.1.x PROGRESS history remains in git history on older commits.
 
-- `AgentExecTunnel`
-- `AgentExecTunnel/agent_forward`
-- `AgentExecTunnel/agent_backward`
+## Message plane (ntfy)
 
-Protocol roles:
+Two world-readable topics on `https://ntfy.sh`:
 
-- submitter writes `agent_forward`, reads `agent_backward`
-- executor reads `agent_forward`, writes `agent_backward`
+- `agent-forward-285` — submitter → executor, task envelopes
+- `agent-backward-285` — executor → submitter, result envelopes
 
-Authoritative task state is always in `agent_backward`.
+Executor polls `/{topic}/json?poll=1&since=2h` with base 1s cadence and upward jitter capped at `timeout/2` (default 300s / 2 = 150s). Jitter grows on both idle and error; any new envelope resets it. Submitter uses the same primitive (`wait_for(task_id)`) on the backward topic.
 
-The architecture allows multiple submitters to publish into forward concurrently. Forward publication therefore must converge through git fetch/rebase/push retry rather than a single-submit assumption.
+Dedup is task_id-keyed and in-memory on both sides. Executor seeds its `seen_ids` on startup from a one-time poll of the backward topic so a restart within the 2h replay window does not re-run already-finished tasks.
 
-## Repositories
+The message plane has **no ACK layer** and **no authentication** — if the executor crashes mid-task and restarts within 2h, the task may re-run once; anyone who guesses the topic can inject a task envelope. MVP assumes a trusted environment. Add HMAC signing or a private ntfy instance for production use.
 
-- `agent_forward/tasks/YYYY/MM/DD/HH/<task_id>.json`
+## File plane (GitHub)
+
+File uploads — binaries, source trees — are still transferred via a plain git repo:
+
 - `agent_forward/files/<namespace>/...`
-- `agent_backward/acks/YYYY/MM/DD/HH/<task_id>.json`
-- `agent_backward/results/YYYY/MM/DD/HH/<task_id>.json`
+
+Provisioned once per host by `tools/bootstrap_repos.py`. The executor does not need this repo at all unless the task commands reference uploaded files.
+
+## Envelope shapes
+
+Task (submitter → `agent-forward-285`):
+
+```json
+{
+  "kind": "task",
+  "version": "v0.2",
+  "task_id": "20260420T123456Z-abc12345ef01234567890abcd",
+  "created_at": "2026-04-20T12:34:56Z",
+  "submitter_id": "host:pid",
+  "submit_mode": "relay",
+  "target_host": "H20",
+  "command": "...",
+  "timeout_seconds": 300,
+  "metadata": {}
+}
+```
+
+Result (executor → `agent-backward-285`):
+
+```json
+{
+  "kind": "result",
+  "version": "v0.2",
+  "task_id": "...",
+  "executor_id": "host:pid",
+  "status": "done | failed | stale",
+  "started_at": "...", "finished_at": "...",
+  "exit_code": 0,
+  "stdout_tail": "...≤4KB...",
+  "stderr_tail": "...≤4KB...",
+  "command_digest": "sha256:...",
+  "process_ref": "pid:12345",
+  "stale_at": null
+}
+```
+
+`timeout_seconds` is authoritative and must be set by the submitter. Missing/invalid produces an immediate `failed` result with an explanatory `stderr_tail`.
 
 ## Main tools
 
-- `python3 tools/bootstrap_repos.py`
-- `python3 submitter/submit_powershell.py 'echo hello'`
-- `python3 submitter/submit_powershell_ssh.py H20 'uname -a'`
-- `python3 submitter/submit_gitbash.py 'ls /c/Users/'`
-- `python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'`
-- `python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir`
-- `python3 executor/run_executor.py`
-- `python3 tools/run_burst_local_relay.py --tasks 30 --interval-seconds 1 --submit-timeout 512 --result-timeout 900 --executor-ready-timeout 120 --submitter gitbash --gitbash-executable /path/to/bash`
-- `python3 tools/run_burst_live.py --duration-seconds 30 --tasks 30 --submit-timeout 512 --result-timeout 300 --mode-set mixed --submitter gitbash --gitbash-executable /path/to/bash`
-- `python3 tools/repair_task.py --task-id ... --clear-ack`
-- `python3 tests/availability/probe.py --probe-id relay_echo --count 1`
-- `python3 tests/availability/probe.py --probe-id ssh_h20_nvidia_smi --ssh-host H20 --count 1`
-- `python3 tests/availability/report.py --serve`
+```bash
+# one-time setup (only needed if this host uploads files)
+python3 tools/bootstrap_repos.py
+
+# submitter CLIs (publish a task, wait for result)
+python3 submitter/submit_powershell.py 'echo hello'
+python3 submitter/submit_powershell_ssh.py H20 'uname -a'
+python3 submitter/submit_gitbash.py 'ls /c/Users/'
+python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'
+
+# upload a file / directory into agent_forward/files/<namespace>/
+python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir
+
+# executor loop (long-running; survives transient ntfy outages)
+python3 executor/run_executor.py
+
+# availability probe and dashboard
+python3 tests/availability/probe.py --probe-id gitbash_echo --count 1
+python3 tests/availability/report.py --serve
+```
 
 ## Startup
 
-The data repos `agent_forward/` and `agent_backward/` are **not** submodules. They are plain sibling clones sitting inside the tunnel checkout and listed in `.gitignore`. They are provisioned by `tools/bootstrap_repos.py`.
-
-Fresh-machine first run — two steps, in order:
+Prerequisites: `python3` and (optionally) `git`. Only stdlib Python is required for the message plane; `git` is needed only if this host runs `submitter/submit_files.py`.
 
 ```bash
 git clone <AgentExecTunnel remote> && cd AgentExecTunnel
-python3 tools/bootstrap_repos.py                 # 1. clone agent_forward and agent_backward
-python3 executor/run_executor.py                 # 2. start executor
+python3 executor/run_executor.py                 # starts polling ntfy forward topic
 ```
 
-Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). Bootstrap clones from the defaults in `agent_exec_tunnel/remotes.py`:
-
-- `https://github.com/hyjack-00/agent_forward.git`
-- `https://github.com/hyjack-00/agent_backward.git`
-
-To point at different remotes (private fork, local bare repo for testing, etc.) set env vars or pass CLI flags:
+If this host will also push files, bootstrap the forward repo once:
 
 ```bash
-AET_FORWARD_REMOTE=... AET_BACKWARD_REMOTE=... python3 tools/bootstrap_repos.py
-# or
-python3 tools/bootstrap_repos.py --forward-url ... --backward-url ... --branch main
+python3 tools/bootstrap_repos.py                 # clones agent_forward
 ```
 
-An optional `.aet-remotes.json` at the tunnel root is read before falling back to defaults (also gitignored).
+`.aet-remotes.json` / `AET_FORWARD_REMOTE` / `AET_DATA_BRANCH` override the default forward repo URL for file uploads only.
 
-### What can be skipped on subsequent updates
+## Ntfy configuration
 
-After the first successful bootstrap, routine update on the same machine is just:
+Settings override any of these via `agent_exec_tunnel.config.Settings`:
+
+- `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
+- `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names
+- `ntfy_poll_since` (default `"2h"`) — server-side replay window used for dedup bootstrap
+- `ntfy_poll_base_seconds` (default `1.0`) — polling base interval
+- `ntfy_poll_jitter_growth` (default `1.10`) / `ntfy_poll_jitter_floor` (default `0.05`) — upward jitter shape
+- `submit_timeout_grace_seconds` (default `15.0`) — extra wait-budget so the submitter can still see the executor-authored `stale` envelope when a task times out
+
+## Resilience
+
+- **Executor crash mid-task**: on restart, `seen_ids` is seeded from the backward topic's 2h window. Completed tasks do not re-run. Tasks that were still in flight when the executor died are eligible to re-run once if the forward envelope is still in the 2h window — intentional MVP trade-off; add persistent ACK for strict at-most-once.
+- **Backward ntfy publish failure**: the executor does not silently drop the result. It spools a `ResultRecord` into `pending_results` and every forward-poll tick retries publish. The task is not marked `seen_ids` until publish succeeds.
+- **Forward ntfy poll failure**: jitter grows instead of hammering the server, so a flaky ntfy doesn't turn into a self-DoS loop.
+- **Submitter timeout**: `wait_for_result` adds `submit_timeout_grace_seconds` on top of the task timeout so the executor's own stale result envelope has time to arrive. Failure modes differentiate "ntfy unreachable" vs "ntfy reachable but executor silent".
+
+## Availability
+
+`tests/availability/` records probe results into `var/availability/data-YYYYMMDD.jsonl` and renders an HTML dashboard with hop-availability cards, p50/p95/p99 latency, preview/total stage timings, a 24h hourly heartbeat SVG, per-probe table, and recent-failures list.
 
 ```bash
-git pull                                          # tunnel-only; does not touch agent_forward/backward
-python3 executor/run_executor.py
+python3 tests/availability/probe.py --mode remote_relay --mean-period 300
+python3 tests/availability/report.py --serve --host 127.0.0.1 --port 8001
 ```
 
-- Skip `bootstrap_repos.py` unless: data-repo remote URL changed, the data dirs got wiped, or you moved the checkout. Bootstrap is idempotent (re-sync via `fetch + reset --hard`), so re-running it is safe.
-- Skip Python dependency setup entirely — there is none.
-- **Never** run `git submodule ...` against this repo; it no longer uses submodules.
-
-Always needed, even on updates:
-
-- A running executor loop (`executor/run_executor.py`) — it does not survive `git pull` by itself; restart after pulling.
-- Network access to the data-repo remotes — the executor does `git fetch` every scan pass.
-
-### Why not submodules
-
-Submodule pinning is wrong for these two repos: they mutate on **every** task (new commits for task publication, ACK, result), so the tunnel commit would constantly need to bump its submodule SHA, and any runtime commit that was not pushed to the configured remote would produce `not our ref` errors on a new machine. Treating them as ignored sibling clones removes the whole class of ghost-SHA failures.
-
-### Migrating from the old submodule layout
-
-If the local checkout predates the submodule removal, git may keep stale module metadata around even after `tools/bootstrap_repos.py` succeeds. Clean it up manually once:
-
-```bash
-git submodule deinit -f agent_forward agent_backward    # no-op if already gone
-rm -rf .git/modules/agent_forward .git/modules/agent_backward
-rm -rf agent_forward agent_backward                     # only if the working dirs are still submodule checkouts
-python3 tools/bootstrap_repos.py                        # re-provision as plain sibling clones
-```
-
-After that the tunnel checkout holds `agent_forward/` and `agent_backward/` as gitignored plain clones; `.gitmodules` should not exist and `.git/modules/` should no longer contain either data-repo entry.
+`--mode local_relay` sets up a PATH shim so `ssh HOST CMD` is emulated by system bash, letting off-network probes exercise the relay path end to end.
 
 ## Process
-
-All work is tracked in [PROGRESS.md](PROGRESS.md).
 
 Every version requires:
 
 - `DESIGN.md` update
-- `reviews/vX.Y.Z.md`
-- `evaluations/vX.Y.Z.md`
+- `reviews/vX.Y.md`
+- `evaluations/vX.Y.md`
 - test/evaluation run
 
-## Availability
-
-Availability monitoring now lives in `tests/availability/`.
-
-- `probe.py` records probe results into `var/availability/data-YYYYMMDD.jsonl`
-- `report.py` builds `var/availability/reports/report-latest.html`
-
-The current availability data model reports:
-
-- ACK latency
-- execution latency
-- result latency
-- total latency
-
-Probe presets include relay and ssh variants, and ssh probes may override the target with `--ssh-host`.
-
-## Local Relay Burst
-
-The supported same-machine burst diagnostic is `tools/run_burst_local_relay.py`.
-
-Behavior:
-
-- it creates two isolated whole-tunnel working copies under a temp dir
-- one copy runs the executor
-- one copy acts as the submitter-side base clone
-- each submitted task gets its own submitter-side working copy
-- all command / ACK / result traffic still goes through the `agent_forward` / `agent_backward` remotes resolved from `agent_exec_tunnel/remotes.py` (env vars / `.aet-remotes.json` / defaults)
-- after the run, the local `agent_forward/` and `agent_backward/` clones in this workspace are re-synced to those remotes so you can inspect the latest visible state locally
-
-On non-Windows hosts, `submit_gitbash.py` can still be used by overriding the executable path:
-
-- CLI: `--gitbash-executable /path/to/bash` on the burst tools
-- environment: `AET_GIT_BASH_EXECUTABLE=/path/to/bash`
-
-## Live Burst
-
-The supported live submit-pressure tool is `tools/run_burst_live.py`.
-
-Behavior:
-
-- it assumes a remote executor is already running elsewhere
-- it does not start any executor locally
-- it creates one isolated submitter-side base clone under a temp dir
-- each launched task gets its own submitter-side tunnel clone
-- traffic still goes through the live `agent_forward` / `agent_backward` remotes resolved from `agent_exec_tunnel/remotes.py`
-- it measures submit/result outcomes from the caller side only
-
-## Synchronization
-
-Even though forward and backward are single-purpose data repositories, synchronization is still part of correctness:
-
-- submitter must sync forward and backward before publication
-- submitter must sync backward before trusting final result visibility
-- executor startup may sync backward for recovery, but steady-state dispatch only syncs forward
-- backward is the only authority for terminal state
-- executor retries transient git sync/push failures forever with backoff
-- submitter uses bounded retry on pre-publish sync and publish push paths
-- task subprocess timeout is written as a durable `stale` result instead of crashing the executor
-
-Relay and ssh are different submit wrappers, but they are the same runtime class of work for executor: one claimed task becomes one executed command.
-
-The repo-local data directories used by the default CLI settings are:
-
-- `agent_forward/` (gitignored, cloned by bootstrap)
-- `agent_backward/` (gitignored, cloned by bootstrap)
-
-## Working Clone Rule
-
-Running submitter and executor against the same remotes is supported.
-
-Running them against the same working clone is not the supported deployment model.
-
-Running more than one executor against the same remotes is also not the supported deployment model.
-
-Use separate working clones even on one machine:
-
-- one submitter clone for forward/backward access on the caller side
-- one executor clone for forward/backward access on the runner side
-
-Use one executor clone only:
-
-- startup recovery imports backward state once
-- steady-state duplicate suppression then relies on local in-memory task state
-- the current protocol therefore assumes one active executor per remote pair
-
-This repository's local integration coverage uses that exact separation.
-
-If you launch both `submitter/*.py` and `executor/run_executor.py` directly against the repo-local `agent_forward/` and `agent_backward/` clones in this same repo, they will share one git working tree per data repo. That can race because both sides call sync operations that do `fetch + checkout/reset`, and both sides also create commits. So:
-
-- same remotes: supported
-- same repo-local data-repo working tree: not supported for concurrent submit + execute
-- multiple executors against one remote pair: not supported
-
-For local same-machine diagnostics without that conflict, use `tools/run_burst_local_relay.py`, which gives executor and submitter separate working copies against the same remotes.
-
-The important distinction is:
-
-- conflict is **not** "submitter and executor edit the same JSON file"
-- conflict **is** "two processes operate on the same git working tree and index"
-
-## Long-Running Executor
-
-The supported executor model is a long-running loop:
-
-- transient fetch/push failures must be retried forever
-- temporary disconnects are expected to recover later
-- executor must keep reconnecting instead of exiting
-- task timeout must become one durable protocol result in `agent_backward/results/...`
-
-More specifically, the current executor behavior is:
-
-- startup does one backward recovery sync, then steady-state scans only sync forward
-- scan finds one claimable task
-- ACK is pushed durably first by a single git-writer thread
-- only after durable ACK does executor start one async worker
-- worker then owns `execute -> finalize` and the main loop does not poll child state
-- timeout writes one durable `stale` result and leaves the local process detached
-- final output is still published only once as one final result/stale record
-- submitter polls only for final result, not for ACK or streaming output
+In-flight plan for the current branch lives in [PLAN.md](PLAN.md); the history log up to v0.1.2 is reachable through `git log`.
 
 ## Skill
 
-The repository-local Codex skill for the new architecture is:
+The repository-local skill for the submit UX is:
 
-- [.codex/skills/agent-exec-tunnel-submit/SKILL.md](.codex/skills/agent-exec-tunnel-submit/SKILL.md)
+- [skills/agent-exec-tunnel-submit/SKILL.md](skills/agent-exec-tunnel-submit/SKILL.md)

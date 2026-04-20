@@ -1,11 +1,13 @@
 ---
 name: agent-exec-tunnel-submit
-description: Submit one non-streaming command or upload one shared file set through the AgentExecTunnel dual-repo protocol. Use when Codex should publish a relay command, an ssh-wrapped command, or shared files into the current forward/backward architecture and wait for the final result.
+description: Submit one non-streaming command or upload one shared file set through the AgentExecTunnel. Use when Codex should publish a relay command, an ssh-wrapped command, or shared files and wait for the final result.
 ---
 
 # AgentExecTunnel Submit
 
-This skill is for **executing commands through the tunnel** or **uploading shared files**. Use this skill from the repository root at `/workspace/AgentExecTunnel`. 
+This skill is for **executing commands through the tunnel** or **uploading shared files**. Use this skill from the repository root at `/workspace/AgentExecTunnel`.
+
+As of v0.2, task envelopes and result envelopes flow over ntfy.sh (topics `agent-forward-285` / `agent-backward-285`). File uploads still go through the `agent_forward` git repo. Task / result transport does not involve git at all.
 
 ## Tunnel
 

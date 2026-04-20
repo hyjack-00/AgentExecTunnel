@@ -347,67 +347,6 @@ def render_html(root: Path, mode_label: str) -> str:
 """
 
 
-def build_report(records: list[dict], mode_label: str) -> str:
-    """Render HTML directly from a caller-supplied record list.
-
-    Mostly for tests; the production path goes through render_html which reads
-    from `storage.load_window`. Records here must already carry `_ts` as a
-    parsed datetime (see `storage.load_window`); we best-effort derive it from
-    `ts` / `ts_utc` for records that don't.
-    """
-    decorated: list[dict] = []
-    for rec in records:
-        if "_ts" in rec:
-            decorated.append(rec)
-            continue
-        ts = storage._parse_ts(rec)
-        if ts is not None:
-            rec = {**rec, "_ts": ts}
-        decorated.append(rec)
-    tags = all_tags()
-    now = datetime.now(timezone.utc)
-    recs_24h = decorated
-    recs_1h = [r for r in decorated if (r.get("_ts") and (now - r["_ts"]).total_seconds() <= 3600)]
-
-    cards = []
-    for tag in tags:
-        ok24, tot24 = _tag_availability(recs_24h, tag)
-        ok1, tot1 = _tag_availability(recs_1h, tag)
-        pct24 = _pct(ok24, tot24)
-        pct1 = _pct(ok1, tot1)
-        cards.append(
-            f'<div class="card">{html.escape(tag)} 24h {_fmt_pct(pct24)} 1h {_fmt_pct(pct1)}</div>'
-        )
-
-    lat24 = _latency_stats(recs_24h)
-    stage24 = _stage_stats(recs_24h)
-    fails = _recent_failures(recs_24h, 20)
-
-    probe_rows = _per_probe_table(recs_24h)
-    probe_rows_html = "".join(
-        f"<tr><td>{html.escape(r['probe_id'])}</td><td>{r['total']}</td><td>{r['ok']}</td>"
-        f"<td>{_fmt_pct(r['pct'])}</td><td>{_fmt_lat(r['p50'])}</td><td>{_fmt_lat(r['p95'])}</td></tr>"
-        for r in probe_rows
-    )
-
-    return f"""<!doctype html>
-<html><body>
-<h1>AgentExecTunnel availability</h1>
-<p>mode={html.escape(mode_label)} total={len(recs_24h)}</p>
-<h2>availability (by hop)</h2>
-{''.join(cards)}
-<h2>latency (ok probes)</h2>
-<p>24h p50={_fmt_lat(lat24['p50'])} p95={_fmt_lat(lat24['p95'])} p99={_fmt_lat(lat24['p99'])} n={lat24['count']}</p>
-<h2>stage timings · mean (ok probes)</h2>
-<p>preview 24h mean: {_fmt_lat(stage24['preview']['mean'])}</p>
-<p>total 24h mean: {_fmt_lat(stage24['total']['mean'])}</p>
-<h2>per-probe · last 24h</h2>
-<table>{probe_rows_html}</table>
-<h2>recent failures</h2>
-<p>{len(fails)} failures in window</p>
-</body></html>"""
-
-
 def generate(root: Path, mode_label: str, snapshot: bool = False) -> Path:
     html_text = render_html(root, mode_label)
     reports = storage.reports_dir(root)

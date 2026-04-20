@@ -25,8 +25,12 @@ def parse_iso_z(value: str) -> datetime:
 def new_task_id(now: datetime | None = None) -> str:
     moment = now or utc_now()
     base = moment.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    digest = hashlib.sha1(f"{moment.timestamp()}".encode()).hexdigest()[:12]
-    jitter = secrets.token_hex(2)
+    # When callers pass `now` without microseconds (tests, replay scenarios),
+    # `moment.timestamp()` collapses and sha1 provides zero within-second
+    # entropy. All uniqueness inside one second therefore comes from the
+    # random token — give it 64 bits, not 16, to survive realistic bursts.
+    digest = hashlib.sha1(f"{moment.timestamp()}".encode()).hexdigest()[:8]
+    jitter = secrets.token_hex(8)
     return f"{base}-{digest}{jitter}"
 
 

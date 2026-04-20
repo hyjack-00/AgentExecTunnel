@@ -11,7 +11,7 @@ from unittest import mock
 from tests.availability import probe as availability_probe
 from tests.availability import storage
 from tests.availability.probes import PROBES, all_tags
-from tests.availability.report import build_report, render_html, generate
+from tests.availability.report import render_html, generate
 
 
 def _write_record(root: Path, rec: dict) -> None:
@@ -126,19 +126,13 @@ class ReportSectionsTests(unittest.TestCase):
             snapshots = list((root / "reports").glob("report-2*.html"))
             self.assertEqual(len(snapshots), 1)
 
-    def test_build_report_has_per_probe_and_hop_sections(self) -> None:
-        html_text = build_report(
-            [
-                _mk_rec("p1", "ok", implies_ok=["relay"], latency_s=1.0, preview_latency_s=0.2),
-                _mk_rec("p1", "ok", implies_ok=["relay"], latency_s=2.0),
-                _mk_rec("p2", "exit_nonzero", implies_ok=["relay", "H20"], latency_s=0.5, err="fail"),
-            ],
-            "manual",
-        )
-        self.assertIn("availability (by hop)", html_text)
-        self.assertIn("per-probe", html_text)
-        self.assertIn("p50", html_text)
-        self.assertIn("p1", html_text)
+    def test_render_html_renders_empty_window_without_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            html_text = render_html(Path(tmp), "empty")
+            self.assertIn("AgentExecTunnel", html_text)
+            self.assertIn("availability (by hop)", html_text)
+            self.assertIn("<svg", html_text)
+            self.assertIn("no failures in window", html_text)
 
 
 class ProbeDriverTests(unittest.TestCase):

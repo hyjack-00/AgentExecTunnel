@@ -131,7 +131,7 @@ def timeout_exit(seconds: int, command_id: str, ntfy_unreachable: bool = False) 
 def _poll_for_result(task_id: str, timeout_seconds: int) -> dict:
     cfg = default_settings()
     ncfg = ntfy_config(cfg)
-    deadline = time.monotonic() + float(timeout_seconds)
+    deadline = time.monotonic() + float(timeout_seconds) + cfg.submit_timeout_grace_seconds
     cap = float(timeout_seconds) / 2.0
     envelope, last_poll_ok = wait_for(
         ncfg,
