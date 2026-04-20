@@ -32,6 +32,21 @@ def _retry_delay(cfg: Settings, retries: int) -> float:
     )
 
 
+def _fmt_git_error(exc: subprocess.CalledProcessError | subprocess.TimeoutExpired) -> str:
+    parts = [str(exc)]
+    stderr = getattr(exc, "stderr", None)
+    if stderr and isinstance(stderr, str):
+        stderr = stderr.strip()
+        if stderr:
+            parts.append(f"stderr={stderr}")
+    stdout = getattr(exc, "stdout", None)
+    if stdout and isinstance(stdout, str):
+        stdout = stdout.strip()
+        if stdout:
+            parts.append(f"stdout={stdout}")
+    return " | ".join(parts)
+
+
 def _retry_git(cfg: Settings, action, *, label: str, max_attempts: int = 3) -> None:
     retries = 0
     while retries < max_attempts:
@@ -43,7 +58,7 @@ def _retry_git(cfg: Settings, action, *, label: str, max_attempts: int = 3) -> N
             if retries >= max_attempts:
                 raise
             delay = _retry_delay(cfg, retries)
-            print(f"{label} failed retries={retries} retry_in={delay}s error={exc}", flush=True)
+            print(f"{label} failed retries={retries} retry_in={delay}s error={_fmt_git_error(exc)}", flush=True)
             time.sleep(delay)
 
 

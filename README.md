@@ -20,7 +20,7 @@ The architecture allows multiple submitters to publish into forward concurrently
 ## Repositories
 
 - `agent_forward/tasks/YYYY/MM/DD/HH/<task_id>.json`
-- `agent_forward/files/<user_name>/...`
+- `agent_forward/files/<namespace>/...`
 - `agent_backward/acks/YYYY/MM/DD/HH/<task_id>.json`
 - `agent_backward/results/YYYY/MM/DD/HH/<task_id>.json`
 

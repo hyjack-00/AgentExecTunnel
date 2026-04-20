@@ -98,7 +98,7 @@ sequenceDiagram
 ### Forward
 
 - `tasks/YYYY/MM/DD/HH/<task_id>.json`
-- `files/<user_name>/...`
+- `files/<namespace>/...`
 
 ### Backward
 
