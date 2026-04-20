@@ -24,11 +24,9 @@ As of v0.2, task envelopes and result envelopes flow over ntfy.sh (topics `agent
 ```bash
 # Relay-host direct command:
 python3 submitter/submit_gitbash.py '<relay_command>'
-python3 submitter/submit_powershell.py '<relay_command>'
 
 # Relay-host ssh-wrapped command:
 python3 submitter/submit_gitbash_ssh.py TARGET_HOST '<target_command>'
-python3 submitter/submit_powershell_ssh.py TARGET_HOST '<target_command>'
 
 # Shared file upload:
 python3 submitter/submit_files.py --name <namespace> --src <local_file_or_dir>
