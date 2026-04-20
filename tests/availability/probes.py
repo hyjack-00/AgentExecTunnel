@@ -70,3 +70,6 @@ def all_tags() -> list[str]:
         for tag in spec.implies_ok:
             seen.setdefault(tag, None)
     return list(seen.keys())
+
+
+PROBES: tuple[ProbeSpec, ...] = tuple(DEFAULT_PROBES.values())

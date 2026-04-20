@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Fake `ssh` shim for local_relay mode.
+
+Invoked as `ssh HOST PAYLOAD` — just runs PAYLOAD through bash locally so we
+can exercise the submit_gitbash_ssh.py path without a real network hop. The
+shim is only picked up when `tests/availability/` is on PATH, which is what
+`probe.py --mode local_relay` (and the README instructions for the local
+executor) configure.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    # Ignore ssh-style flag arguments (e.g. `-o StrictHostKeyChecking=no`);
+    # the submitter today emits only `ssh HOST PAYLOAD` but future probes may
+    # add flags and we want them silently tolerated rather than misread as the
+    # host.
+    positionals: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token.startswith("-") and len(token) > 1:
+            # -o FOO=BAR style — swallow the value too.
+            if token in {"-o", "-i", "-l", "-p", "-F"} and i + 1 < len(argv):
+                i += 2
+                continue
+            i += 1
+            continue
+        positionals.append(token)
+        i += 1
+    if len(positionals) < 2:
+        sys.stderr.write(f"fake-ssh: expected HOST PAYLOAD, got {argv!r}\n")
+        return 2
+    _host = positionals[0]
+    payload = " ".join(positionals[1:])
+    return subprocess.run(["bash", "-c", payload], env=os.environ.copy()).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
