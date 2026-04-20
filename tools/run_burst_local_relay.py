@@ -89,9 +89,9 @@ def copy_tunnel_tree(src: Path, dst: Path, *, include_data_repos: bool = False) 
     shutil.copytree(src, dst, ignore=ignore)
 
 
-def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: str) -> None:
-    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", forward_remote, str(tunnel_root / "agent_forward")])
-    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", backward_remote, str(tunnel_root / "agent_backward")])
+def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: str, branch: str = "main") -> None:
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", branch, forward_remote, str(tunnel_root / "agent_forward")])
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", branch, backward_remote, str(tunnel_root / "agent_backward")])
     for repo in (tunnel_root / "agent_forward", tunnel_root / "agent_backward"):
         run(["git", "config", "user.email", "agent@example.com"], cwd=repo)
         run(["git", "config", "user.name", "agent"], cwd=repo)
@@ -111,7 +111,7 @@ def load_remote_urls() -> tuple[str, str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a local relay burst using two isolated tunnel repos: one executor repo and one submitter-side base repo, with traffic going through the live agent_forward/agent_backward remotes declared in .gitmodules."
+        description="Run a local relay burst using two isolated tunnel repos: one executor repo and one submitter-side base repo, with traffic going through the agent_forward/agent_backward remotes resolved by agent_exec_tunnel.remotes."
     )
     parser.add_argument("--tasks", type=int, default=30)
     parser.add_argument("--interval-seconds", type=float, default=1.0)

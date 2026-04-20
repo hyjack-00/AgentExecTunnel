@@ -52,10 +52,46 @@ Terminal task truth is always in `agent_backward`.
   - single backward writer
 - `agent_exec_tunnel/storage.py`
   - Git sync / commit / push primitives
+- `agent_exec_tunnel/remotes.py`
+  - data-repo URL resolution (env / file / defaults)
+- `tools/bootstrap_repos.py`
+  - clone or sync `agent_forward/` and `agent_backward/` next to the tunnel checkout
 - `tools/run_burst_local_relay.py`
   - two isolated whole-repo local integration pressure test
 - `tools/run_burst_live.py`
   - submit-pressure tool against an already-running remote executor
+
+### End-to-End Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Submitter
+    participant F as agent_forward
+    participant B as agent_backward
+    participant E as Executor
+    participant P as Child process
+
+    S->>F: sync forward
+    S->>B: sync backward
+    S->>F: write task + commit + push
+    Note over S: print SUBMITTED
+
+    E->>F: sync + scan
+    alt task is claimable
+        E->>B: write ACK + push
+        E->>P: start task
+        P-->>E: exit or deadline
+        E->>B: write final/stale result + push
+    else task already claimed or finished
+        Note over E: skip task
+    end
+
+    loop until caller timeout or result exists
+        S->>B: sync backward
+        B-->>S: final result or no result yet
+    end
+```
 
 ## Repository Layout
 
@@ -68,6 +104,10 @@ Terminal task truth is always in `agent_backward`.
 
 - `acks/YYYY/MM/DD/HH/<task_id>.json`
 - `results/YYYY/MM/DD/HH/<task_id>.json`
+
+### Repo-Local Data Directories
+
+`agent_forward/` and `agent_backward/` sit inside the tunnel checkout but are **not** git submodules — they are gitignored sibling clones provisioned by `tools/bootstrap_repos.py`. They mutate on every task publication / ACK / result, so pinning their SHAs under a submodule parent would produce constant ghost-SHA drift. Remote URL resolution lives in `agent_exec_tunnel/remotes.py` (env vars → `.aet-remotes.json` → built-in defaults).
 
 ## Task State Model
 
@@ -120,6 +160,27 @@ Important behavior:
 - Timeout becomes a durable `stale` result
 - The main scan loop does not poll running child state
 
+### Dispatcher / Worker / Writer
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as Executor loop
+    participant F as forward clone
+    participant W as git writer
+    participant BW as backward-write clone
+    participant T as task worker
+
+    L->>F: sync + scan
+    L->>W: enqueue ACK write
+    W->>BW: commit + push ACK
+    W-->>L: ACK durable
+    L->>T: start async worker
+    Note over T: execute command
+    T->>W: enqueue final/stale result
+    W->>BW: commit + push result
+```
+
 ## Concurrency Model
 
 ### Submitter Concurrency
@@ -139,6 +200,29 @@ Why:
 - no distributed lease or compare-and-swap protocol exists across executors
 
 Running multiple executors against the same forward/backward remotes is therefore out of scope.
+
+### Why Shared Worktree Is Unsafe
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Submitter
+    participant F as shared forward worktree
+    participant B as shared backward worktree
+    participant E as Executor
+
+    par submit path
+        S->>F: fetch / checkout / reset
+        S->>B: fetch / checkout / reset
+        S->>F: add / commit / push
+    and executor path
+        E->>F: fetch / checkout / reset
+        E->>B: fetch / checkout / reset
+        E->>B: add / commit / push
+    end
+
+    Note over F,B: race is on one worktree, one index, and one set of Git lockfiles
+```
 
 ## Failure Model
 
@@ -184,82 +268,6 @@ That state is currently not auto-reclaimed.
 - Shared submitter/executor worktree
 - Multiple executors on one remote pair
 - Streaming protocol output
-
-## Sequence: Submit / ACK / Finalize
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as Submitter
-    participant F as agent_forward
-    participant B as agent_backward
-    participant E as Executor
-    participant P as Child process
-
-    S->>F: sync forward
-    S->>B: sync backward
-    S->>F: write task + commit + push
-    Note over S: print SUBMITTED
-
-    E->>F: sync + scan
-    alt task is claimable
-        E->>B: write ACK + push
-        E->>P: start task
-        P-->>E: exit or deadline
-        E->>B: write final/stale result + push
-    else task already claimed or finished
-        Note over E: skip task
-    end
-
-    loop until caller timeout or result exists
-        S->>B: sync backward
-        B-->>S: final result or no result yet
-    end
-```
-
-## Sequence: Dispatcher / Worker / Writer
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as Executor loop
-    participant F as forward clone
-    participant W as git writer
-    participant BW as backward-write clone
-    participant T as task worker
-
-    L->>F: sync + scan
-    L->>W: enqueue ACK write
-    W->>BW: commit + push ACK
-    W-->>L: ACK durable
-    L->>T: start async worker
-    Note over T: execute command
-    T->>W: enqueue final/stale result
-    W->>BW: commit + push result
-```
-
-## Sequence: Why Shared Worktree Is Unsafe
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as Submitter
-    participant F as shared forward worktree
-    participant B as shared backward worktree
-    participant E as Executor
-
-    par submit path
-        S->>F: fetch / checkout / reset
-        S->>B: fetch / checkout / reset
-        S->>F: add / commit / push
-    and executor path
-        E->>F: fetch / checkout / reset
-        E->>B: fetch / checkout / reset
-        E->>B: add / commit / push
-    end
-
-    Note over F,B: race is on one worktree, one index, and one set of Git lockfiles
-```
 
 ## Timing and Retry Policy
 

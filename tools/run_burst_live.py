@@ -121,9 +121,9 @@ def copy_tunnel_tree(src: Path, dst: Path, *, include_data_repos: bool = False) 
     shutil.copytree(src, dst, ignore=ignore)
 
 
-def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: str) -> None:
-    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", forward_remote, str(tunnel_root / "agent_forward")])
-    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", backward_remote, str(tunnel_root / "agent_backward")])
+def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: str, branch: str = "main") -> None:
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", branch, forward_remote, str(tunnel_root / "agent_forward")])
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", branch, backward_remote, str(tunnel_root / "agent_backward")])
     for repo in (tunnel_root / "agent_forward", tunnel_root / "agent_backward"):
         run(["git", "config", "user.email", "agent@example.com"], cwd=repo)
         run(["git", "config", "user.name", "agent"], cwd=repo)
