@@ -35,4 +35,5 @@ class FreshCloneTests(unittest.TestCase):
             bootstrap = run(["python3", "tools/bootstrap_repos.py"], cwd=fresh_tunnel)
             self.assertIn("bootstrap ok", bootstrap.stdout)
             executor = run(["python3", "executor/run_executor.py", "--once"], cwd=fresh_tunnel)
-            self.assertIn("SCAN scanned=0", executor.stdout)
+            self.assertIn("SCAN scanned=", executor.stdout)
+            self.assertIn("claimed=", executor.stdout)

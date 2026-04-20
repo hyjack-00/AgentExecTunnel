@@ -23,6 +23,19 @@ def init_repo(path: Path) -> None:
 
 
 class ExecutorFlowTests(unittest.TestCase):
+    def test_git_writer_retries_init_failures_before_entering_queue_loop(self) -> None:
+        writer = Executor(settings=Settings(), executor_id="exec").git_writer
+        failure = subprocess.TimeoutExpired(["git", "clone"], timeout=10)
+        with mock.patch.object(writer, "_ensure_repo", side_effect=[failure, None]) as ensure_repo, \
+             mock.patch.object(writer._queue, "get", side_effect=[None]) as queue_get, \
+             mock.patch("time.sleep") as sleep, \
+             mock.patch.object(writer, "log") as log:
+            writer._run()
+        self.assertEqual(ensure_repo.call_count, 2)
+        queue_get.assert_called_once()
+        sleep.assert_called_once()
+        self.assertIn("writer init failed retries=1", log.call_args[0][0])
+
     def test_executor_acks_then_completes_in_worker_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

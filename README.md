@@ -35,7 +35,6 @@ The architecture allows multiple submitters to publish into forward concurrently
 - `python3 executor/run_executor.py`
 - `python3 tools/run_burst_local_relay.py --tasks 30 --interval-seconds 1 --submit-timeout 512 --result-timeout 900 --executor-ready-timeout 120 --submitter gitbash --gitbash-executable /path/to/bash`
 - `python3 tools/run_burst_live.py --duration-seconds 30 --tasks 30 --submit-timeout 512 --result-timeout 300 --mode-set mixed --submitter gitbash --gitbash-executable /path/to/bash`
-- `python3 tools/run_burst_real_submodules.py --duration-seconds 30 --tasks 30 --use-fake-ssh`
 - `python3 tools/repair_task.py --task-id ... --clear-ack`
 - `python3 tests/availability/probe.py --probe-id relay_echo --count 1`
 - `python3 tests/availability/probe.py --probe-id ssh_h20_nvidia_smi --ssh-host H20 --count 1`
@@ -52,7 +51,7 @@ python3 tools/bootstrap_repos.py                  # 2. verify submodule origins,
 python3 executor/run_executor.py                  # 3. start executor
 ```
 
-Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). The submodule remotes listed in `.gitmodules` must be reachable from this machine — if they are private GitHub repos, configure SSH access **before** step 1, otherwise step 1 will fail during submodule clone/fetch.
+Prerequisites: `python3` + `git` (code is stdlib-only, no `pip install` needed). The submodule remotes listed in `.gitmodules` must be reachable from this machine.
 
 ### What can be skipped on subsequent updates
 
@@ -76,7 +75,7 @@ Always needed, even on updates:
 ### When a re-bootstrap is actually required
 
 - First clone on a new machine.
-- Switching the submodule origin between GitHub SSH and a local bare remote under `var/local_remotes/`.
+- Switching the submodule origin between GitHub HTTPS and a local bare remote under `var/local_remotes/`.
 - Recovering from a wiped `agent_forward/` or `agent_backward/` working tree.
 - Moving the checkout to a new path where relative submodule origins no longer resolve.
 
@@ -107,31 +106,43 @@ The current availability data model reports:
 
 Probe presets include relay and ssh variants, and ssh probes may override the target with `--ssh-host`.
 
-## Real Submodule Burst
+## Local Relay Burst
 
-If you want a pressure run whose task / ACK / result files are directly visible under the checked-out submodules, use:
-
-```bash
-python3 tools/run_burst_real_submodules.py --duration-seconds 30 --tasks 30 --use-fake-ssh
-```
+The supported same-machine burst diagnostic is `tools/run_burst_local_relay.py`.
 
 Behavior:
 
-- executor uses the checked-out `agent_forward/` and `agent_backward/` submodule working trees
-- submitters use temporary clones against the same remotes so multiple concurrent submits are possible
-- after the run, the submodule working trees are synced again so you can inspect the resulting files locally
+- it creates two isolated whole-tunnel working copies under a temp dir
+- one copy runs the executor
+- one copy acts as the submitter-side base clone
+- each submitted task gets its own submitter-side working copy
+- all command / ACK / result traffic still goes through the `agent_forward` / `agent_backward` remotes from `.gitmodules`
+- after the run, the checked-out submodules in this workspace are re-synced to those remotes so you can inspect the latest visible state locally
 
 `python3 tools/bootstrap_repos.py` now also repairs local file-based submodule origins: if a submodule still points at an out-of-repo sibling path, bootstrap rewires it to a repository-local bare remote under `var/local_remotes/`.
 
-The checked-in `.gitmodules` now uses explicit SSH URLs:
+The checked-in `.gitmodules` now uses explicit HTTPS URLs:
 
-- `git@github.com:hyjack-00/agent_forward.git`
-- `git@github.com:hyjack-00/agent_backward.git`
+- `https://github.com/hyjack-00/agent_forward.git`
+- `https://github.com/hyjack-00/agent_backward.git`
 
 On non-Windows hosts, `submit_gitbash.py` can still be used by overriding the executable path:
 
 - CLI: `--gitbash-executable /path/to/bash` on the burst tools
 - environment: `AET_GIT_BASH_EXECUTABLE=/path/to/bash`
+
+## Live Burst
+
+The supported live submit-pressure tool is `tools/run_burst_live.py`.
+
+Behavior:
+
+- it assumes a remote executor is already running elsewhere
+- it does not start any executor locally
+- it creates one isolated submitter-side base clone under a temp dir
+- each launched task gets its own submitter-side tunnel clone
+- traffic still goes through the live `agent_forward` / `agent_backward` remotes from `.gitmodules`
+- it measures submit/result outcomes from the caller side only
 
 ## Synchronization
 
@@ -158,10 +169,18 @@ Running submitter and executor against the same remotes is supported.
 
 Running them against the same working clone is not the supported deployment model.
 
+Running more than one executor against the same remotes is also not the supported deployment model.
+
 Use separate working clones even on one machine:
 
 - one submitter clone for forward/backward access on the caller side
 - one executor clone for forward/backward access on the runner side
+
+Use one executor clone only:
+
+- startup recovery imports backward state once
+- steady-state duplicate suppression then relies on local in-memory task state
+- the current protocol therefore assumes one active executor per remote pair
 
 This repository's local integration coverage uses that exact separation.
 
@@ -169,8 +188,9 @@ If you launch both `submitter/*.py` and `executor/run_executor.py` directly agai
 
 - same remotes: supported
 - same checked-out submodule working tree: not supported for concurrent submit + execute
+- multiple executors against one remote pair: not supported
 
-For local same-machine diagnostics without that conflict, keep executor on the checked-out submodules and give submitters their own temporary clones against the same submodule remotes, as `tools/run_burst_real_submodules.py` already does.
+For local same-machine diagnostics without that conflict, use `tools/run_burst_local_relay.py`, which gives executor and submitter separate working copies against the same remotes.
 
 The important distinction is:
 

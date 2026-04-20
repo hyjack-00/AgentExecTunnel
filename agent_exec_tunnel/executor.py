@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .config import Settings, default_settings
 from .protocol import AckRecord, ResultRecord, command_digest, iso_z, iter_hour_buckets, utc_now
-from .storage import git_commit_push, git_sync, read_json, tail_text, write_json
+from .storage import GIT_ENV, git_commit_push, git_sync, read_json, tail_text, write_json
 
 
 @dataclass(frozen=True)
@@ -159,6 +159,8 @@ class GitWriter:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=self.settings.git_command_timeout_seconds,
+            env=GIT_ENV,
         )
         subprocess.run(
             ["git", "config", "user.email", "agent@example.com"],
@@ -167,6 +169,8 @@ class GitWriter:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=self.settings.git_command_timeout_seconds,
+            env=GIT_ENV,
         )
         subprocess.run(
             ["git", "config", "user.name", "agent"],
@@ -175,6 +179,8 @@ class GitWriter:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=self.settings.git_command_timeout_seconds,
+            env=GIT_ENV,
         )
 
     def _commit_push_with_retry(self, message: str) -> None:
@@ -225,7 +231,18 @@ class GitWriter:
                 time.sleep(delay)
 
     def _run(self) -> None:
-        self._ensure_repo()
+        retries = 0
+        while True:
+            try:
+                self._ensure_repo()
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+                retries += 1
+                delay = self.retry_delay(retries)
+                self.log(
+                    f"writer init failed retries={retries} retry_in={delay}s root={self.repo_root} error={exc}"
+                )
+                time.sleep(delay)
         while True:
             request = self._queue.get()
             if request is None:

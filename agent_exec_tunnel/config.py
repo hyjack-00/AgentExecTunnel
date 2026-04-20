@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.0.8"
+PACKAGE_VERSION = "v0.1"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -24,7 +24,7 @@ class Settings:
     default_timeout_seconds: int = 512
     network_retry_backoff_seconds: float = 1.0
     network_retry_max_backoff_seconds: float = 8.0
-    git_command_timeout_seconds: int = 30
+    git_command_timeout_seconds: int = 10
     log_level: str = "info"
 
 

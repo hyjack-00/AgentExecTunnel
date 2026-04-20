@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import os
 import random
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,13 +21,31 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def run_submit(argv: list[str], *, gitbash_executable: str | None = None) -> subprocess.Popen[str]:
+GIT_ENV = os.environ.copy()
+GIT_ENV.setdefault("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes")
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        env=GIT_ENV,
+    )
+
+
+def run_submit(argv: list[str], cwd: Path, *, gitbash_executable: str | None = None) -> subprocess.Popen[str]:
     env = os.environ.copy()
+    env.setdefault("GIT_SSH_COMMAND", GIT_ENV["GIT_SSH_COMMAND"])
     if gitbash_executable:
         env["AET_GIT_BASH_EXECUTABLE"] = gitbash_executable
     return subprocess.Popen(
         argv,
-        cwd=ROOT,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -66,14 +87,14 @@ def build_schedule(total_tasks: int, duration_seconds: int, seed: int, mode_set:
 
 def build_submit_command(entry: dict, *, timeout_seconds: int, submitter: str, ssh_host: str) -> list[str]:
     if submitter == "gitbash":
-        relay = ROOT / "submitter" / "submit_gitbash.py"
-        ssh = ROOT / "submitter" / "submit_gitbash_ssh.py"
+        relay = "submitter/submit_gitbash.py"
+        ssh = "submitter/submit_gitbash_ssh.py"
     else:
-        relay = ROOT / "submitter" / "submit_powershell.py"
-        ssh = ROOT / "submitter" / "submit_powershell_ssh.py"
+        relay = "submitter/submit_powershell.py"
+        ssh = "submitter/submit_powershell_ssh.py"
     if entry["mode"] == "relay":
-        return ["python3", str(relay), "--timeout-seconds", str(timeout_seconds), entry["payload_text"]]
-    return ["python3", str(ssh), "--timeout-seconds", str(timeout_seconds), ssh_host, entry["payload_text"]]
+        return ["python3", relay, "--timeout-seconds", str(timeout_seconds), entry["payload_text"]]
+    return ["python3", ssh, "--timeout-seconds", str(timeout_seconds), ssh_host, entry["payload_text"]]
 
 
 def make_output_dir() -> Path:
@@ -83,8 +104,50 @@ def make_output_dir() -> Path:
     return out_dir
 
 
+def copy_tunnel_tree(src: Path, dst: Path, *, include_data_repos: bool = False) -> None:
+    src = src.resolve()
+
+    def ignore(path: str, names: list[str]) -> set[str]:
+        current = Path(path).resolve()
+        blocked: set[str] = set()
+        if current == src:
+            blocked.update({"var", ".git"})
+            if not include_data_repos:
+                blocked.update({"agent_forward", "agent_backward"})
+        for name in names:
+            if name == "__pycache__" or name == ".pytest_cache" or name.endswith(".pyc"):
+                blocked.add(name)
+        return blocked
+
+    shutil.copytree(src, dst, ignore=ignore)
+
+
+def attach_repo_clones(tunnel_root: Path, forward_remote: str, backward_remote: str) -> None:
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", forward_remote, str(tunnel_root / "agent_forward")])
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", "main", backward_remote, str(tunnel_root / "agent_backward")])
+    for repo in (tunnel_root / "agent_forward", tunnel_root / "agent_backward"):
+        run(["git", "config", "user.email", "agent@example.com"], cwd=repo)
+        run(["git", "config", "user.name", "agent"], cwd=repo)
+
+
+def load_submodule_urls() -> tuple[str, str]:
+    parser = configparser.ConfigParser()
+    if not parser.read(ROOT / ".gitmodules"):
+        raise SystemExit("failed to read .gitmodules")
+    try:
+        forward_remote = parser['submodule "agent_forward"']["url"].strip()
+        backward_remote = parser['submodule "agent_backward"']["url"].strip()
+    except KeyError as exc:
+        raise SystemExit(f"missing submodule url in .gitmodules: {exc}") from exc
+    if not forward_remote or not backward_remote:
+        raise SystemExit("submodule urls in .gitmodules are empty")
+    return forward_remote, backward_remote
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a live burst through the current submitter CLI against already-running remote executor infrastructure.")
+    parser = argparse.ArgumentParser(
+        description="Run live submit pressure against an already-running remote executor. Each launched task uses its own isolated submitter-side tunnel clone."
+    )
     parser.add_argument("--duration-seconds", type=int, default=30)
     parser.add_argument("--tasks", type=int, default=30)
     parser.add_argument("--seed", type=int, default=7)
@@ -102,6 +165,7 @@ def main() -> None:
     args = parse_args()
     schedule = build_schedule(args.tasks, args.duration_seconds, args.seed, args.mode_set)
     out_dir = make_output_dir()
+    forward_remote, backward_remote = load_submodule_urls()
 
     print("starting live burst", flush=True)
     print(f"repo_root={ROOT}", flush=True)
@@ -116,77 +180,93 @@ def main() -> None:
     print(f"submit_timeout={args.submit_timeout}", flush=True)
     print(f"result_timeout={args.result_timeout}", flush=True)
     print(f"drain_seconds={args.drain_seconds}", flush=True)
+    print(f"forward_remote={forward_remote}", flush=True)
+    print(f"backward_remote={backward_remote}", flush=True)
+    print("assumption=remote executor already running", flush=True)
 
     launched: list[dict] = []
-    start = time.monotonic()
-    next_index = 0
-    last_status_tick = -1
+    with tempfile.TemporaryDirectory() as tmp:
+        temp_root = Path(tmp)
+        submitter_base = temp_root / "submitter_base"
+        copy_tunnel_tree(ROOT, submitter_base)
+        attach_repo_clones(submitter_base, forward_remote, backward_remote)
 
-    while next_index < len(schedule):
-        elapsed = time.monotonic() - start
-        while next_index < len(schedule) and schedule[next_index]["offset_seconds"] <= elapsed:
-            entry = schedule[next_index]
-            argv = build_submit_command(
-                entry,
-                timeout_seconds=args.submit_timeout,
-                submitter=args.submitter,
-                ssh_host=args.ssh_host,
-            )
-            proc = run_submit(argv, gitbash_executable=args.gitbash_executable)
-            record = {
-                **entry,
-                "command_text": quote_command(argv),
-                "proc": proc,
-                "launched_at": iso_now(),
-            }
-            launched.append(record)
-            print(f"[launch] t={elapsed:.2f}s case={entry['case_id']} mode={entry['mode']} cmd={record['command_text']}", flush=True)
-            next_index += 1
-        tick = int(elapsed)
-        if tick != last_status_tick:
+        start = time.monotonic()
+        next_index = 0
+        last_status_tick = -1
+
+        while next_index < len(schedule):
+            elapsed = time.monotonic() - start
+            while next_index < len(schedule) and schedule[next_index]["offset_seconds"] <= elapsed:
+                entry = schedule[next_index]
+                submitter_tunnel = temp_root / f"submitter_run_{next_index:03d}"
+                copy_tunnel_tree(submitter_base, submitter_tunnel, include_data_repos=True)
+                argv = build_submit_command(
+                    entry,
+                    timeout_seconds=args.submit_timeout,
+                    submitter=args.submitter,
+                    ssh_host=args.ssh_host,
+                )
+                proc = run_submit(argv, submitter_tunnel, gitbash_executable=args.gitbash_executable)
+                record = {
+                    **entry,
+                    "command_text": quote_command(argv),
+                    "proc": proc,
+                    "submitter_root": str(submitter_tunnel),
+                    "launched_at": iso_now(),
+                }
+                launched.append(record)
+                print(
+                    f"[launch] t={elapsed:.2f}s case={entry['case_id']} mode={entry['mode']} submitter_root={submitter_tunnel} cmd={record['command_text']}",
+                    flush=True,
+                )
+                next_index += 1
+            tick = int(elapsed)
+            if tick != last_status_tick:
+                inflight = sum(1 for item in launched if item["proc"].poll() is None)
+                print(f"[status] t={elapsed:.2f}s launched={len(launched)}/{len(schedule)} inflight={inflight}", flush=True)
+                last_status_tick = tick
+            time.sleep(0.05)
+
+        drain_deadline = time.monotonic() + args.drain_seconds
+        while any(item["proc"].poll() is None for item in launched) and time.monotonic() < drain_deadline:
             inflight = sum(1 for item in launched if item["proc"].poll() is None)
-            print(f"[status] t={elapsed:.2f}s launched={len(launched)}/{len(schedule)} inflight={inflight}", flush=True)
-            last_status_tick = tick
-        time.sleep(0.05)
+            print(f"[drain] inflight={inflight}", flush=True)
+            time.sleep(1.0)
 
-    drain_deadline = time.monotonic() + args.drain_seconds
-    while any(item["proc"].poll() is None for item in launched) and time.monotonic() < drain_deadline:
-        inflight = sum(1 for item in launched if item["proc"].poll() is None)
-        print(f"[drain] inflight={inflight}", flush=True)
-        time.sleep(1.0)
-
-    rows: list[dict] = []
-    done = 0
-    failed = 0
-    timed_out = 0
-    for item in launched:
-        proc: subprocess.Popen[str] = item["proc"]
-        if proc.poll() is None:
-            proc.kill()
-            stdout, stderr = proc.communicate(timeout=5)
-            exit_kind = "drain_timeout"
-            timed_out += 1
-        else:
-            stdout, stderr = proc.communicate(timeout=5)
-            merged = (stdout or "") + ("\n" + stderr if stderr else "")
-            exit_kind = "done" if proc.returncode == 0 else ("caller_timeout" if "timeout after " in merged.lower() else "failed")
-            if proc.returncode == 0:
-                done += 1
+        rows: list[dict] = []
+        done = 0
+        failed = 0
+        timed_out = 0
+        for item in launched:
+            proc: subprocess.Popen[str] = item["proc"]
+            if proc.poll() is None:
+                proc.kill()
+                stdout, stderr = proc.communicate(timeout=5)
+                exit_kind = "drain_timeout"
+                timed_out += 1
             else:
-                failed += 1
-        row = {
-            "case_id": item["case_id"],
-            "mode": item["mode"],
-            "command_text": item["command_text"],
-            "launched_at": item["launched_at"],
-            "finished_at": iso_now(),
-            "returncode": proc.returncode,
-            "exit_kind": exit_kind,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
-        rows.append(row)
-        print(f"[result] case={item['case_id']} mode={item['mode']} exit_kind={exit_kind} returncode={proc.returncode}", flush=True)
+                stdout, stderr = proc.communicate(timeout=5)
+                merged = (stdout or "") + ("\n" + stderr if stderr else "")
+                exit_kind = "done" if proc.returncode == 0 else ("caller_timeout" if "timeout after " in merged.lower() else "failed")
+                if proc.returncode == 0:
+                    done += 1
+                else:
+                    failed += 1
+            row = {
+                "case_id": item["case_id"],
+                "mode": item["mode"],
+                "command_text": item["command_text"],
+                "submitter_root": item["submitter_root"],
+                "launched_at": item["launched_at"],
+                "finished_at": iso_now(),
+                "returncode": proc.returncode,
+                "exit_kind": exit_kind,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+            rows.append(row)
+            print(f"[result] case={item['case_id']} mode={item['mode']} exit_kind={exit_kind} returncode={proc.returncode}", flush=True)
 
     (out_dir / "results.jsonl").write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
@@ -202,6 +282,8 @@ def main() -> None:
         "mode_set": args.mode_set,
         "submitter": args.submitter,
         "ssh_host": args.ssh_host,
+        "forward_remote": forward_remote,
+        "backward_remote": backward_remote,
         "artifacts_dir": str(out_dir),
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
