@@ -9,6 +9,5 @@ var/
 .gemini
 
 agent_forward/
-agent_backward/
 .aet-remotes.json
 

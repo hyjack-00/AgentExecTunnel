@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import queue
 import shlex
 import socket
 import subprocess
@@ -12,16 +11,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import Settings, default_settings
-from .protocol import AckRecord, ResultRecord, command_digest, iso_z, iter_hour_buckets, utc_now
-from .storage import GIT_ENV, git_commit_push, git_sync, read_json, tail_text, write_json
-
-
-@dataclass(frozen=True)
-class ScanStats:
-    scanned: int
-    claimed: int
-    skipped_result: int
-    skipped_ack: int
+from .ntfy_transport import NtfyConfig, NtfyPublishError, poll_loop, publish, seed_seen_ids
+from .protocol import ResultRecord, command_digest, iso_z, utc_now
+from .storage import tail_text
 
 
 @dataclass
@@ -43,15 +35,6 @@ class TailBuffer:
             return self._chunks
 
 
-@dataclass
-class WriteRequest:
-    rel_path: Path
-    payload: dict
-    message: str
-    done: threading.Event = field(default_factory=threading.Event)
-    error: Exception | None = None
-
-
 def default_executor_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
@@ -60,214 +43,25 @@ def _log_now() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def _bucket_glob(root: Path, top: str, bucket: tuple[str, str, str, str]) -> list[Path]:
-    y, m, d, h = bucket
-    base = root / top / y / m / d / h
-    if not base.exists():
-        return []
-    return sorted(base.glob("*.json"))
-
-
-class GitWriter:
-    def __init__(self, settings: Settings, log, retry_delay) -> None:
-        self.settings = settings
-        self.log = log
-        self.retry_delay = retry_delay
-        self.repo_root = settings.executor_backward_write_root or (
-            settings.tunnel_root / "var" / "runtime" / "executor" / "backward-write"
-        )
-        self._queue: queue.Queue[WriteRequest | None] = queue.Queue()
-        self._started = False
-        self._lock = threading.Lock()
-        self._local_only = False
-        self._thread = threading.Thread(target=self._run, daemon=True, name="aet-git-writer")
-
-    def start(self) -> None:
-        with self._lock:
-            if self._started:
-                return
-            self._started = True
-            self._thread.start()
-
-    def close(self) -> None:
-        if not self._started:
-            return
-        self._queue.put(None)
-        self._thread.join(timeout=1)
-
-    def write_durable(self, rel_path: Path, payload: dict, message: str) -> None:
-        self.start()
-        request = WriteRequest(rel_path=rel_path, payload=payload, message=message)
-        self._queue.put(request)
-        request.done.wait()
-        if request.error is not None:
-            raise request.error
-
-    def _origin_source(self) -> str | None:
-        proc = subprocess.run(
-            ["git", "config", "--get", "remote.origin.url"],
-            cwd=self.settings.backward_root,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        origin = proc.stdout.strip()
-        if origin:
-            return origin
-        return None
-
-    def _ensure_repo(self) -> None:
-        source = self._origin_source()
-        if source is None:
-            self.repo_root = self.settings.backward_root
-            self._local_only = True
-            return
-        if (self.repo_root / ".git").exists():
-            retries = 0
-            while True:
-                try:
-                    git_sync(self.repo_root, timeout_seconds=self.settings.git_command_timeout_seconds)
-                    return
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                    retries += 1
-                    delay = self.retry_delay(retries)
-                    self.log(
-                        f"writer sync failed retries={retries} retry_in={delay}s root={self.repo_root} error={exc}"
-                    )
-                    time.sleep(delay)
-
-        self.repo_root.parent.mkdir(parents=True, exist_ok=True)
-        if self.repo_root.exists():
-            for child in self.repo_root.iterdir():
-                if child.is_dir():
-                    for nested in sorted(child.rglob("*"), reverse=True):
-                        if nested.is_file() or nested.is_symlink():
-                            nested.unlink(missing_ok=True)
-                        elif nested.is_dir():
-                            nested.rmdir()
-                    child.rmdir()
-                else:
-                    child.unlink(missing_ok=True)
-        else:
-            self.repo_root.mkdir(parents=True, exist_ok=True)
-            self.repo_root.rmdir()
-
-        subprocess.run(
-            ["git", "clone", source, str(self.repo_root)],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=self.settings.git_command_timeout_seconds,
-            env=GIT_ENV,
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "agent@example.com"],
-            cwd=self.repo_root,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=self.settings.git_command_timeout_seconds,
-            env=GIT_ENV,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "agent"],
-            cwd=self.repo_root,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=self.settings.git_command_timeout_seconds,
-            env=GIT_ENV,
-        )
-
-    def _commit_push_with_retry(self, message: str) -> None:
-        if self._local_only:
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=self.repo_root,
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self.settings.git_command_timeout_seconds,
-            )
-            status = subprocess.run(
-                ["git", "status", "--short"],
-                cwd=self.repo_root,
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self.settings.git_command_timeout_seconds,
-            )
-            if status.stdout.strip():
-                subprocess.run(
-                    ["git", "commit", "-m", message],
-                    cwd=self.repo_root,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=self.settings.git_command_timeout_seconds,
-                )
-            return
-        retries = 0
-        while True:
-            try:
-                git_commit_push(
-                    self.repo_root,
-                    message,
-                    max_attempts=None,
-                    timeout_seconds=self.settings.git_command_timeout_seconds,
-                )
-                return
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                retries += 1
-                delay = self.retry_delay(retries)
-                self.log(f"commit attempt failed message={message!r} retries={retries} retry_in={delay}s error={exc}")
-                time.sleep(delay)
-
-    def _run(self) -> None:
-        retries = 0
-        while True:
-            try:
-                self._ensure_repo()
-                break
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-                retries += 1
-                delay = self.retry_delay(retries)
-                self.log(
-                    f"writer init failed retries={retries} retry_in={delay}s root={self.repo_root} error={exc}"
-                )
-                time.sleep(delay)
-        while True:
-            request = self._queue.get()
-            if request is None:
-                return
-            try:
-                write_json(self.repo_root / request.rel_path, request.payload)
-                self._commit_push_with_retry(request.message)
-            except Exception as exc:  # noqa: BLE001
-                request.error = exc
-            finally:
-                request.done.set()
-
-
 class Executor:
     def __init__(self, settings: Settings | None = None, executor_id: str | None = None) -> None:
         self.settings = settings or default_settings()
         self.executor_id = executor_id or default_executor_id()
         self._state_lock = threading.Lock()
-        self.claiming_tasks: set[str] = set()
+        self.seen_ids: set[str] = set()
         self.running_tasks: set[str] = set()
-        self.blocked_tasks: set[str] = set()
-        self.finished_tasks: set[str] = set()
         self.worker_done: dict[str, threading.Event] = {}
         self.cleanup_threads: list[threading.Thread] = []
-        self.git_writer = GitWriter(self.settings, self.log, self._retry_delay)
+        self._stop_flag = threading.Event()
+        self.ntfy = NtfyConfig(
+            server_url=self.settings.ntfy_server_url,
+            forward_topic=self.settings.ntfy_forward_topic,
+            backward_topic=self.settings.ntfy_backward_topic,
+            poll_since=self.settings.ntfy_poll_since,
+            poll_base_seconds=self.settings.ntfy_poll_base_seconds,
+            poll_jitter_growth=self.settings.ntfy_poll_jitter_growth,
+            poll_jitter_floor=self.settings.ntfy_poll_jitter_floor,
+        )
 
     def log(self, message: str) -> None:
         print(f"[{_log_now()}] {message}", flush=True)
@@ -277,122 +71,98 @@ class Executor:
             self.log(message)
 
     def close(self) -> None:
+        self._stop_flag.set()
         for thread in list(self.cleanup_threads):
             thread.join(timeout=1)
-        self.git_writer.close()
 
-    def _retry_delay(self, retries: int) -> float:
-        return min(
-            self.settings.network_retry_backoff_seconds * (2 ** (retries - 1)),
-            self.settings.network_retry_max_backoff_seconds,
+    def stop(self) -> None:
+        self._stop_flag.set()
+
+    def run_loop(self) -> None:
+        seed = seed_seen_ids(self.ntfy, self.ntfy.backward_topic)
+        if seed:
+            with self._state_lock:
+                self.seen_ids.update(seed)
+            self.log(f"ntfy seed: {len(seed)} already-finished task_ids loaded from backward topic")
+        cap_seconds = self.settings.default_timeout_seconds / 2.0
+        self.log(
+            f"ntfy poll loop starting topic={self.ntfy.forward_topic} "
+            f"base={self.ntfy.poll_base_seconds:g}s cap={cap_seconds:g}s"
+        )
+        poll_loop(
+            self.ntfy,
+            self.ntfy.forward_topic,
+            on_envelope=self._handle_task_envelope,
+            seen_ids=self.seen_ids,
+            cap_seconds=cap_seconds,
+            stop=self._stop_flag.is_set,
+            log=self.log,
+            debug=self.debug,
         )
 
-    def _git_sync_once(self, repo_root: Path) -> None:
-        git_sync(repo_root, timeout_seconds=self.settings.git_command_timeout_seconds)
+    def _handle_task_envelope(self, task: dict) -> None:
+        task_id = task.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            self.log(f"ntfy drop envelope with no task_id: {task!r}")
+            return
+        with self._state_lock:
+            if task_id in self.seen_ids or task_id in self.running_tasks:
+                return
+            self.seen_ids.add(task_id)
+        timeout_seconds = task.get("timeout_seconds")
+        if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+            self.log(f"ntfy reject task_id={task_id} invalid timeout_seconds={timeout_seconds!r}")
+            self._publish_envelope_failure(task, "invalid or missing timeout_seconds in task envelope")
+            return
+        command = task.get("command")
+        if not isinstance(command, str) or not command:
+            self.log(f"ntfy reject task_id={task_id} missing command")
+            self._publish_envelope_failure(task, "missing command in task envelope")
+            return
+        try:
+            self._start_worker(task)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"start worker error task_id={task_id} error={exc}")
+            self._publish_envelope_failure(task, f"worker start failed: {exc}")
 
-    def _recover_from_backward(self) -> None:
-        for ack_path in self.settings.backward_root.glob("acks/**/*.json"):
-            payload = read_json(ack_path)
-            self.blocked_tasks.add(payload["task_id"])
-        for result_path in self.settings.backward_root.glob("results/**/*.json"):
-            payload = read_json(result_path)
-            task_id = payload["task_id"]
-            self.blocked_tasks.discard(task_id)
-            self.finished_tasks.add(task_id)
-
-    def startup_scan(self) -> ScanStats:
-        self._git_sync_once(self.settings.forward_root)
-        self._git_sync_once(self.settings.backward_root)
-        self._recover_from_backward()
-        return self.scan_recent(self.settings.startup_scan_hours, sync_forward=False)
-
-    def startup_scan_with_retry(self) -> ScanStats:
-        retries = 0
-        while True:
-            try:
-                stats = self.startup_scan()
-                self.log("initial sync complete")
-                return stats
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                retries += 1
-                delay = self._retry_delay(retries)
-                self.log(f"initial sync failed retries={retries} retry_in={delay}s error={exc}")
-                time.sleep(delay)
-
-    def scan_recent_with_retry(self, hours: int | None = None) -> ScanStats:
-        retries = 0
-        while True:
-            try:
-                return self.scan_recent(hours=hours)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                retries += 1
-                delay = self._retry_delay(retries)
-                self.log(f"sync attempt failed retries={retries} retry_in={delay}s error={exc}")
-                time.sleep(delay)
-
-    def scan_recent(self, hours: int | None = None, *, sync_forward: bool = True) -> ScanStats:
-        cfg = self.settings
-        now = utc_now()
-        buckets = iter_hour_buckets(now, hours or cfg.steady_scan_hours)
-        if sync_forward:
-            self._git_sync_once(cfg.forward_root)
-
-        scanned = 0
-        claimed = 0
-        skipped_result = 0
-        skipped_ack = 0
-
-        for bucket in buckets:
-            for task_path in _bucket_glob(cfg.forward_root, "tasks", bucket):
-                scanned += 1
-                task = read_json(task_path)
-                task_id = task["task_id"]
-                with self._state_lock:
-                    if task_id in self.finished_tasks:
-                        skipped_result += 1
-                        continue
-                    if task_id in self.blocked_tasks or task_id in self.claiming_tasks or task_id in self.running_tasks:
-                        skipped_ack += 1
-                        continue
-                    self.claiming_tasks.add(task_id)
-                try:
-                    self._ack_and_start_worker(task)
-                    claimed += 1
-                except Exception as exc:  # noqa: BLE001
-                    with self._state_lock:
-                        self.claiming_tasks.discard(task_id)
-                    self.log(f"scan error path={task_path.relative_to(cfg.forward_root).as_posix()} error={exc}")
-
-        if scanned == 0:
-            self.debug("scan: no pending tasks")
-        else:
-            fields = [("claimed", claimed), ("running", skipped_ack)]
-            parts = [f"{name}={value}" for name, value in fields if value]
-            if parts:
-                self.log("scan " + " ".join(parts))
-        return ScanStats(scanned=scanned, claimed=claimed, skipped_result=skipped_result, skipped_ack=skipped_ack)
-
-    def _ack_and_start_worker(self, task: dict) -> None:
-        now = utc_now()
-        digest = command_digest(task["command"], task["submit_mode"], task.get("target_host"))
-        ack = AckRecord(
-            task_id=task["task_id"],
-            forward_task_path=task["forward_task_path"],
+    def _publish_envelope_failure(self, task: dict, reason: str) -> None:
+        now_iso = iso_z(utc_now())
+        digest = command_digest(
+            task.get("command", ""),
+            task.get("submit_mode", ""),
+            task.get("target_host"),
+        )
+        result = ResultRecord(
+            task_id=task.get("task_id", ""),
             executor_id=self.executor_id,
-            ack_at=iso_z(now),
-            submit_mode=task["submit_mode"],
-            target_host=task.get("target_host"),
+            status="failed",
+            started_at=now_iso,
+            finished_at=now_iso,
+            exit_code=-1,
+            stdout_tail="",
+            stderr_tail=tail_text(reason),
             command_digest=digest,
         )
-        ack_rel = Path("acks") / Path(task["forward_task_path"]).relative_to("tasks")
-        self.git_writer.write_durable(ack_rel, ack.to_json(), f"ack task {task['task_id']}")
+        self._publish_result(result)
+
+    def _publish_result(self, result: ResultRecord) -> None:
+        try:
+            publish(self.ntfy, self.ntfy.backward_topic, result.to_envelope())
+        except NtfyPublishError as exc:
+            self.log(f"ntfy publish result failed task_id={result.task_id} error={exc}")
+
+    def _start_worker(self, task: dict) -> None:
+        task_id = task["task_id"]
         with self._state_lock:
-            self.claiming_tasks.discard(task["task_id"])
-            self.running_tasks.add(task["task_id"])
-            self.blocked_tasks.add(task["task_id"])
-            done = self.worker_done.setdefault(task["task_id"], threading.Event())
+            self.running_tasks.add(task_id)
+            done = self.worker_done.setdefault(task_id, threading.Event())
             done.clear()
-        thread = threading.Thread(target=self._run_task_worker, args=(task,), daemon=True, name=f"aet-task-{task['task_id']}")
+        thread = threading.Thread(
+            target=self._run_task_worker,
+            args=(task,),
+            daemon=True,
+            name=f"aet-task-{task_id}",
+        )
         thread.start()
 
     def _run_task_worker(self, task: dict) -> None:
@@ -532,7 +302,6 @@ class Executor:
         digest = command_digest(task["command"], task["submit_mode"], task.get("target_host"))
         result = ResultRecord(
             task_id=task["task_id"],
-            forward_task_path=task["forward_task_path"],
             executor_id=self.executor_id,
             status=status,
             started_at=started_at,
@@ -544,13 +313,11 @@ class Executor:
             process_ref=process_ref,
             stale_at=stale_at,
         )
-        result_rel = Path("results") / Path(task["forward_task_path"]).relative_to("tasks")
-        status_word = "stale " if status == "stale" else ""
-        self.git_writer.write_durable(result_rel, result.to_json(), f"write {status_word}result {result.task_id}".replace("  ", " "))
+        self._publish_result(result)
         with self._state_lock:
             task_id = task["task_id"]
             self.running_tasks.discard(task_id)
-            self.finished_tasks.add(task_id)
+            self.seen_ids.add(task_id)
             done = self.worker_done.setdefault(task_id, threading.Event())
             done.set()
         self.log(f"finalize {task['task_id']} status={status} exit={exit_code}")
@@ -568,20 +335,3 @@ class Executor:
         with self._state_lock:
             done = self.worker_done.setdefault(task_id, threading.Event())
         return done.wait(timeout=timeout)
-
-    def run_loop(self, poll_interval_seconds: float = 1.0) -> None:
-        self.log("initial sync before executor scan loop")
-        self.startup_scan_with_retry()
-        min_interval = float(self.settings.executor_poll_min_seconds)
-        max_interval = float(self.settings.executor_poll_max_seconds)
-        factor = float(self.settings.executor_poll_backoff_factor)
-        self.log(f"dynamic polling enabled min={min_interval:g}s max={max_interval:g}s factor={factor:g}")
-        interval = min_interval
-        while True:
-            stats = self.scan_recent_with_retry()
-            if stats.scanned or stats.claimed:
-                interval = min_interval
-            else:
-                interval = min(interval * factor, max_interval)
-            self.debug(f"next scan in {interval:g}s")
-            time.sleep(interval)

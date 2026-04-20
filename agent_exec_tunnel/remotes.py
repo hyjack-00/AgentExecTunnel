@@ -8,11 +8,9 @@ from pathlib import Path
 from .config import TUNNEL_ROOT
 
 DEFAULT_FORWARD_REMOTE = "https://github.com/hyjack-00/agent_forward.git"
-DEFAULT_BACKWARD_REMOTE = "https://github.com/hyjack-00/agent_backward.git"
 DEFAULT_BRANCH = "main"
 
 ENV_FORWARD_REMOTE = "AET_FORWARD_REMOTE"
-ENV_BACKWARD_REMOTE = "AET_BACKWARD_REMOTE"
 ENV_BRANCH = "AET_DATA_BRANCH"
 
 CONFIG_FILENAME = ".aet-remotes.json"
@@ -21,7 +19,6 @@ CONFIG_FILENAME = ".aet-remotes.json"
 @dataclass(frozen=True)
 class RemoteConfig:
     forward_url: str
-    backward_url: str
     branch: str
 
 
@@ -43,14 +40,9 @@ def load_remotes(tunnel_root: Path | None = None) -> RemoteConfig:
         or file_overrides.get("forward_url")
         or DEFAULT_FORWARD_REMOTE
     )
-    backward = (
-        os.environ.get(ENV_BACKWARD_REMOTE)
-        or file_overrides.get("backward_url")
-        or DEFAULT_BACKWARD_REMOTE
-    )
     branch = (
         os.environ.get(ENV_BRANCH)
         or file_overrides.get("branch")
         or DEFAULT_BRANCH
     )
-    return RemoteConfig(forward_url=forward, backward_url=backward, branch=branch)
+    return RemoteConfig(forward_url=forward, branch=branch)

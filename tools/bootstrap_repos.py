@@ -74,10 +74,10 @@ def ensure_repo(target: Path, url: str, branch: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Clone or sync the agent_forward / agent_backward data repos next to this tunnel checkout."
+        description="Clone or sync the agent_forward data repo next to this tunnel checkout. "
+                    "agent_forward only carries file uploads now; task/result messages go over ntfy."
     )
     parser.add_argument("--forward-url", default=None, help="override forward remote URL")
-    parser.add_argument("--backward-url", default=None, help="override backward remote URL")
     parser.add_argument("--branch", default=None, help="override data-repo branch")
     return parser.parse_args()
 
@@ -87,19 +87,16 @@ def main() -> None:
     settings = default_settings()
     remotes = load_remotes(settings.tunnel_root)
     forward_url = args.forward_url or remotes.forward_url
-    backward_url = args.backward_url or remotes.backward_url
     branch = args.branch or remotes.branch
 
     try:
         forward_status = ensure_repo(settings.forward_root, forward_url, branch)
-        backward_status = ensure_repo(settings.backward_root, backward_url, branch)
     except subprocess.CalledProcessError as exc:
         raise SystemExit(format_called_process_error(exc)) from exc
 
     print("bootstrap ok")
     print(f"tunnel={settings.tunnel_root}")
     print(f"forward={settings.forward_root} origin={forward_url} ({forward_status})")
-    print(f"backward={settings.backward_root} origin={backward_url} ({backward_status})")
 
 
 if __name__ == "__main__":
