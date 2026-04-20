@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,18 +14,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent_exec_tunnel.config import default_settings
+from agent_exec_tunnel.ntfy_transport import NtfyPublishError, wait_for
 from agent_exec_tunnel.protocol import new_task_id
-from agent_exec_tunnel.storage import git_sync, read_json
-from agent_exec_tunnel.submitter import publish_task
+from agent_exec_tunnel.submitter import ntfy_config, publish_task
 
 MODE_RELAY = "relay"
 MODE_SSH = "ssh"
 POWERSHELL_EXECUTABLE = os.environ.get("AET_POWERSHELL_EXECUTABLE", "powershell.exe")
 GIT_BASH_EXECUTABLE = os.environ.get("AET_GIT_BASH_EXECUTABLE", r"C:\Program Files\Git\bin\bash.exe")
 DEFAULT_EXIT_TIMEOUT = 124
-CALLER_POLL_MIN_SECONDS = 1.0
-CALLER_POLL_MAX_SECONDS = 1.0
-CALLER_POLL_BACKOFF_FACTOR = 2.0
 
 
 def encode_powershell_script(script: str) -> str:
@@ -123,46 +118,31 @@ def write_final_output(payload: dict) -> None:
         sys.stderr.flush()
 
 
-def timeout_exit(seconds: int, command_id: str, last_sync_error: str | None = None) -> None:
+def timeout_exit(seconds: int, command_id: str, ntfy_unreachable: bool = False) -> None:
     sys.stderr.write(f"timeout after {seconds}s waiting for final result command_id={command_id}\n")
-    if last_sync_error:
-        sys.stderr.write(f"last sync error: {last_sync_error}\n")
+    if ntfy_unreachable:
+        sys.stderr.write("ntfy unreachable; command may still be running on executor side\n")
+    else:
+        sys.stderr.write("ntfy reachable; executor may be down or overloaded, check executor status\n")
     sys.stderr.flush()
     raise SystemExit(DEFAULT_EXIT_TIMEOUT)
 
 
-def _backoff_interval(current: float, factor: float, maximum: float) -> float:
-    return min(current * factor, maximum)
-
-
-def _read_result_payload(task_id: str, backward_root: Path) -> dict | None:
-    for result in backward_root.glob("results/**/*.json"):
-        if result.name == f"{task_id}.json":
-            return read_json(result)
-    return None
-
-
-def _poll_for_result(task_id: str, timeout_seconds: int, poll_interval_seconds: float) -> dict:
+def _poll_for_result(task_id: str, timeout_seconds: int) -> dict:
     cfg = default_settings()
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
-    interval = poll_interval_seconds
-    last_sync_error: str | None = None
-    payload = _read_result_payload(task_id, cfg.backward_root)
-    while payload is None and datetime.now(timezone.utc) < deadline:
-        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
-        if remaining <= 0:
-            break
-        time.sleep(min(interval, remaining))
-        try:
-            git_sync(cfg.backward_root, timeout_seconds=cfg.git_command_timeout_seconds)
-            last_sync_error = None
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            last_sync_error = str(exc)
-        payload = _read_result_payload(task_id, cfg.backward_root)
-        interval = _backoff_interval(interval, CALLER_POLL_BACKOFF_FACTOR, CALLER_POLL_MAX_SECONDS)
-    if payload is None:
-        timeout_exit(timeout_seconds, task_id, last_sync_error)
-    return payload
+    ncfg = ntfy_config(cfg)
+    deadline = time.monotonic() + float(timeout_seconds)
+    cap = float(timeout_seconds) / 2.0
+    envelope, last_poll_ok = wait_for(
+        ncfg,
+        ncfg.backward_topic,
+        task_id,
+        deadline_monotonic=deadline,
+        cap_seconds=cap,
+    )
+    if envelope is None:
+        timeout_exit(timeout_seconds, task_id, ntfy_unreachable=not last_poll_ok)
+    return envelope
 
 
 def _exit_from_payload(payload: dict) -> None:
@@ -197,14 +177,14 @@ def submit_and_wait(
             task_id=command_id,
             emit_submitted=False,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except NtfyPublishError as exc:
         sys.stderr.write(f"publish rejected; command was not published command_id={command_id}\n")
-        sys.stderr.write(f"git error: {exc}\n")
+        sys.stderr.write(f"ntfy error: {exc}\n")
         sys.stderr.flush()
         raise SystemExit(1)
 
     sys.stdout.write(f"SUBMITTED command_id={command_id}\n")
     sys.stdout.flush()
-    payload = _poll_for_result(command_id, timeout, CALLER_POLL_MIN_SECONDS)
+    payload = _poll_for_result(command_id, timeout)
     write_final_output(payload)
     _exit_from_payload(payload)

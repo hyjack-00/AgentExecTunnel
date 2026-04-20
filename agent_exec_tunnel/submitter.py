@@ -3,21 +3,17 @@ from __future__ import annotations
 import os
 import random
 import socket
-import subprocess
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 
 from .config import Settings, default_settings
-from .protocol import TaskRecord, iso_z, new_task_id, task_path, utc_now
-from .storage import git_commit_push, git_sync, read_json, write_json
+from .ntfy_transport import NtfyConfig, NtfyPublishError, publish, wait_for
+from .protocol import TaskRecord, iso_z, new_task_id, utc_now
 
 
 @dataclass(frozen=True)
 class SubmitResult:
     task_id: str
-    result_path: Path
     payload: dict
 
 
@@ -25,41 +21,23 @@ def default_submitter_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def ntfy_config(cfg: Settings) -> NtfyConfig:
+    return NtfyConfig(
+        server_url=cfg.ntfy_server_url,
+        forward_topic=cfg.ntfy_forward_topic,
+        backward_topic=cfg.ntfy_backward_topic,
+        poll_since=cfg.ntfy_poll_since,
+        poll_base_seconds=cfg.ntfy_poll_base_seconds,
+        poll_jitter_growth=cfg.ntfy_poll_jitter_growth,
+        poll_jitter_floor=cfg.ntfy_poll_jitter_floor,
+    )
+
+
 def _retry_delay(cfg: Settings, retries: int) -> float:
     return min(
         cfg.network_retry_backoff_seconds * (2 ** (retries - 1)),
         cfg.network_retry_max_backoff_seconds,
     )
-
-
-def _fmt_git_error(exc: subprocess.CalledProcessError | subprocess.TimeoutExpired) -> str:
-    parts = [str(exc)]
-    stderr = getattr(exc, "stderr", None)
-    if stderr and isinstance(stderr, str):
-        stderr = stderr.strip()
-        if stderr:
-            parts.append(f"stderr={stderr}")
-    stdout = getattr(exc, "stdout", None)
-    if stdout and isinstance(stdout, str):
-        stdout = stdout.strip()
-        if stdout:
-            parts.append(f"stdout={stdout}")
-    return " | ".join(parts)
-
-
-def _retry_git(cfg: Settings, action, *, label: str, max_attempts: int = 3) -> None:
-    retries = 0
-    while retries < max_attempts:
-        try:
-            action()
-            return
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            retries += 1
-            if retries >= max_attempts:
-                raise
-            delay = _retry_delay(cfg, retries)
-            print(f"{label} failed retries={retries} retry_in={delay}s error={_fmt_git_error(exc)}", flush=True)
-            time.sleep(delay)
 
 
 def publish_task(
@@ -72,12 +50,11 @@ def publish_task(
     submitter_id: str | None = None,
     task_id: str | None = None,
     emit_submitted: bool = True,
-) -> tuple[str, str]:
+) -> str:
     cfg = settings or default_settings()
     now = utc_now()
     resolved_task_id = task_id or new_task_id(now)
-    path = task_path(cfg.forward_root, resolved_task_id, now)
-    rel = path.relative_to(cfg.forward_root).as_posix()
+    resolved_timeout = int(timeout_seconds or cfg.default_timeout_seconds)
     task = TaskRecord(
         task_id=resolved_task_id,
         created_at=iso_z(now),
@@ -85,25 +62,19 @@ def publish_task(
         submit_mode=submit_mode,
         target_host=target_host,
         command=command,
-        timeout_seconds=timeout_seconds or cfg.default_timeout_seconds,
-        forward_task_path=rel,
+        timeout_seconds=resolved_timeout,
         metadata=metadata or {},
     )
-    last_error: subprocess.CalledProcessError | subprocess.TimeoutExpired | None = None
+    envelope = task.to_envelope()
+    ncfg = ntfy_config(cfg)
+
+    last_error: NtfyPublishError | None = None
     max_rounds = 3
     for round_index in range(1, max_rounds + 1):
         try:
-            git_sync(cfg.forward_root, timeout_seconds=cfg.git_command_timeout_seconds)
-            git_sync(cfg.backward_root, timeout_seconds=cfg.git_command_timeout_seconds)
-            write_json(path, task.to_json())
-            git_commit_push(
-                cfg.forward_root,
-                f"submit task {resolved_task_id}",
-                max_attempts=12,
-                timeout_seconds=cfg.git_command_timeout_seconds,
-            )
+            publish(ncfg, ncfg.forward_topic, envelope)
             break
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        except NtfyPublishError as exc:
             last_error = exc
             if round_index >= max_rounds:
                 raise
@@ -116,35 +87,42 @@ def publish_task(
     else:
         assert last_error is not None
         raise last_error
+
     if emit_submitted:
-        print(f"SUBMITTED task_id={resolved_task_id} forward_task_path={rel}")
-    return resolved_task_id, rel
+        print(f"SUBMITTED task_id={resolved_task_id}")
+    return resolved_task_id
 
 
 def wait_for_result(
     task_id: str,
     settings: Settings | None = None,
-    poll_interval_seconds: float | None = None,
     result_timeout_seconds: int | None = None,
 ) -> SubmitResult:
     cfg = settings or default_settings()
-    deadline = time.monotonic() + float(result_timeout_seconds or cfg.default_timeout_seconds)
-    sleep_s = poll_interval_seconds or cfg.submit_poll_interval_seconds
-    last_sync_error: subprocess.CalledProcessError | subprocess.TimeoutExpired | None = None
-    while time.monotonic() < deadline:
-        try:
-            git_sync(cfg.backward_root, timeout_seconds=cfg.git_command_timeout_seconds)
-            last_sync_error = None
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            last_sync_error = exc
-        for result in cfg.backward_root.glob(f"results/**/*.json"):
-            if result.name == f"{task_id}.json":
-                payload = read_json(result)
-                return SubmitResult(task_id=task_id, result_path=result, payload=payload)
-        time.sleep(sleep_s)
-    if last_sync_error is not None:
-        raise TimeoutError(f"timeout waiting for final result task_id={task_id}; last sync error={last_sync_error}")
-    raise TimeoutError(f"timeout waiting for final result task_id={task_id}")
+    timeout = float(result_timeout_seconds or cfg.default_timeout_seconds)
+    deadline = time.monotonic() + timeout
+    ncfg = ntfy_config(cfg)
+    cap = timeout / 2.0
+
+    envelope, last_poll_ok = wait_for(
+        ncfg,
+        ncfg.backward_topic,
+        task_id,
+        deadline_monotonic=deadline,
+        cap_seconds=cap,
+    )
+    if envelope is None:
+        if not last_poll_ok:
+            raise TimeoutError(
+                f"timeout waiting for final result task_id={task_id}; "
+                f"last ntfy poll failed — server may be unreachable; "
+                f"task may still be running on executor side"
+            )
+        raise TimeoutError(
+            f"timeout waiting for final result task_id={task_id}; "
+            f"ntfy reachable — executor may be down or overloaded, check executor status"
+        )
+    return SubmitResult(task_id=task_id, payload=envelope)
 
 
 def submit_task(
@@ -155,11 +133,10 @@ def submit_task(
     metadata: dict | None = None,
     settings: Settings | None = None,
     submitter_id: str | None = None,
-    poll_interval_seconds: float | None = None,
     result_timeout_seconds: int | None = None,
 ) -> SubmitResult:
     cfg = settings or default_settings()
-    task_id, _rel = publish_task(
+    task_id = publish_task(
         command=command,
         submit_mode=submit_mode,
         target_host=target_host,
@@ -171,6 +148,5 @@ def submit_task(
     return wait_for_result(
         task_id=task_id,
         settings=cfg,
-        poll_interval_seconds=poll_interval_seconds,
         result_timeout_seconds=result_timeout_seconds or timeout_seconds,
     )
