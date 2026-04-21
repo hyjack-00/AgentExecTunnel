@@ -5,15 +5,52 @@ import time
 import unittest
 from unittest import mock
 
+from agent_exec_tunnel import ntfy_transport
 from agent_exec_tunnel.ntfy_transport import (
     NtfyConfig,
     _attachment_maybe_json,
+    _auth_header,
     _colorize_retry,
     _record_to_envelope,
     poll_since,
     poll_loop,
     wait_for,
 )
+
+
+class AuthHeaderTests(unittest.TestCase):
+    def test_empty_token_returns_no_header(self) -> None:
+        with mock.patch.object(ntfy_transport, "_NTFY_AUTH_TOKEN", ""):
+            self.assertEqual(_auth_header(), {})
+
+    def test_nonempty_token_returns_bearer_header(self) -> None:
+        with mock.patch.object(ntfy_transport, "_NTFY_AUTH_TOKEN", "tk_example12345"):
+            self.assertEqual(_auth_header(), {"Authorization": "Bearer tk_example12345"})
+
+    def test_publish_request_carries_auth_header_when_token_set(self) -> None:
+        with mock.patch.object(ntfy_transport, "_NTFY_AUTH_TOKEN", "tk_abc"), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.urllib.request.urlopen") as urlopen:
+            # urlopen context manager contract
+            urlopen.return_value.__enter__.return_value.read.return_value = b""
+            ntfy_transport._publish_once(NtfyConfig(), "t1", b'{"a":1}')
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer tk_abc")
+
+    def test_publish_request_has_no_auth_header_when_token_empty(self) -> None:
+        with mock.patch.object(ntfy_transport, "_NTFY_AUTH_TOKEN", ""), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = b""
+            ntfy_transport._publish_once(NtfyConfig(), "t1", b'{"a":1}')
+        req = urlopen.call_args.args[0]
+        self.assertIsNone(req.get_header("Authorization"))
+
+    def test_poll_since_carries_auth_header_when_token_set(self) -> None:
+        with mock.patch.object(ntfy_transport, "_NTFY_AUTH_TOKEN", "tk_poll"), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.__iter__.return_value = iter([])
+            poll_since(NtfyConfig(), "t1", since="30m")
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer tk_poll")
 
 
 class RetryLogFormattingTests(unittest.TestCase):

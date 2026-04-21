@@ -120,6 +120,11 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 - `executor_shell` — path to the shell binary. Default: `/bin/bash` on Linux, Git Bash on Windows, fallback to `cmd.exe`. Override with env `AET_EXECUTOR_SHELL=<path>`.
 - `executor_shell_args` — the `-c`-equivalent flag list. Default: `["-c"]`, or `["/c"]` if `executor_shell` is `cmd.exe`. Override with env `AET_EXECUTOR_SHELL_ARGS="-Command"` (whitespace-split).
 
+**Ntfy authentication** (new in v0.3.3):
+- `agent_exec_tunnel.ntfy_transport.NTFY_AUTH_TOKEN` — hardcoded string at the top of `ntfy_transport.py`. Fill in your ntfy access token (e.g. `tk_xxxxxxx`) to attach `Authorization: Bearer <token>` to **every** publish / poll / attachment-fetch. Leave empty for anonymous ntfy.sh.
+- `AET_NTFY_TOKEN` env var — same effect, takes precedence over the hardcoded default. Useful when you prefer not to commit the token.
+- One source of truth: both submitter and executor go through `ntfy_transport`, so switching modes is a single-line edit.
+
 **Ntfy**:
 - `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
 - `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names

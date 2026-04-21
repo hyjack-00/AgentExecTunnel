@@ -94,10 +94,6 @@
 - [x] README / DESIGN：更新 CLI 列表与执行端平台说明
 - [x] VERSION / PACKAGE_VERSION → v0.3.1；`reviews/v0.3.1.md` + `evaluations/v0.3.1.md`；tag v0.3.1（3cf3969）
 
-### 9. 已知问题（留给 v0.3+ ）
-- [ ] **`submit_files.py` 同步问题**：多 submitter 并发 push 到同一个 forward 仓库 main 分支时存在 git rebase 竞争；当前**暂不可用**于并发场景。单 submitter 场景正常。根因不在 ntfy 转轨，是上古 git 文件平面的老问题。后续考虑：改为 object-store（S3/R2），或每文件一个独立分支/tag。
-- [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
-
 ### 8.3 v0.3.2：executor 改 shell=False + envelope 保持 string + submit.py ✅
 
 **触发**：user 重新澄清需求：envelope 字符串传输（secondary preference）；relay 要彻底去掉 cmd.exe 这一层；ssh 变体 CLI 仅作便利工具，与手写 `ssh HOST '...'` 用户侧效果等价；EXTRA：submit.py 可通过复杂手写 payload 达成任何变体等效。
@@ -115,6 +111,21 @@
 - [x] **新增** `tools/test_remote_relay.py`：31 个复杂 payload 测试脚本（单双反引号嵌套、`$VAR`、pipe、redirect、heredoc、subshell、UTF-8、多行、literal `\`、glob、长 payload、nested Python JSON），走 submit_gitbash_ssh → fake ssh 或真实远端。支持 `--host`、`--only`、`--stop-on-fail`
 - [x] 文档：DESIGN.md Transport flow 改为新链路 + 更新 parse-count 表；SKILL.md CLI 表改为"按便利程度选"、submit.py 置顶；README 同步 Configuration 章节
 - [x] VERSION / PACKAGE_VERSION → v0.3.2；reviews/v0.3.2.md + evaluations/v0.3.2.md；tag v0.3.2
+
+### 8.4 v0.3.3：ntfy 非匿名访问（hardcoded token）✅
+**动机**：公共 ntfy.sh 匿名 tier 有 rate limit（HTTP 429）+ 端口耗尽（Errno 99）。user 要在代码里留一个"自己填 token"的位置，让 submitter + executor 都以带 `Authorization: Bearer <token>` 头访问私有 ntfy 或 ntfy Pro。
+
+- [x] `agent_exec_tunnel/ntfy_transport.py` 顶部加硬编码常量 `NTFY_AUTH_TOKEN = ""`（用户自填）；`AET_NTFY_TOKEN` env 可覆盖
+- [x] 每个 HTTP 请求（`_publish_once` / `poll_since` / `_load_json_url`）带 `Authorization: Bearer <token>` 头，当常量为空时不带（维持匿名行为）
+- [x] submitter + executor 都经 `ntfy_transport` 一个入口，改一处生效
+- [x] 单元测试：空 token 无 Authorization 头；非空 token 有头（5 个 AuthHeaderTests）
+- [x] 文档：README Configuration + DESIGN.md "No auth" → "partially closed in v0.3.3"
+- [x] VERSION → v0.3.3、reviews + evaluations、tag v0.3.3
+
+### 9. 已知问题（留给 v0.3+ ）
+- [ ] `submit_files.py`
+- [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
+- [ ] executor 也需要识别附件化的大附件文件消息，需要将读取逻辑在 exe & sub 之间通用化
 
 ### 10. v0.4 候选：其余 deferred 一次性做完
 **动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。

@@ -11,6 +11,33 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Ntfy authentication (v0.3.3+)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   Fill in a ntfy access token (e.g. `tk_abc...`) below to send every
+#   publish / poll / attachment-fetch with an `Authorization: Bearer …` header.
+#   Leave empty to keep the current anonymous behavior (public ntfy.sh).
+#
+#   A single source of truth for the whole tunnel — both submitter and
+#   executor go through this module, so touching this one constant
+#   switches both to authenticated mode at once.
+#
+#   You can also set `AET_NTFY_TOKEN` in the environment; env wins over
+#   the hardcoded default so you can keep the repo clean.
+#
+NTFY_AUTH_TOKEN = ""  # ← paste your ntfy token here
+_NTFY_AUTH_TOKEN = os.environ.get("AET_NTFY_TOKEN", NTFY_AUTH_TOKEN)
+
+
+def _auth_header() -> dict[str, str]:
+    """Return `{Authorization: Bearer …}` when a token is configured,
+    otherwise `{}` (and the request goes anonymous as before)."""
+    if _NTFY_AUTH_TOKEN:
+        return {"Authorization": f"Bearer {_NTFY_AUTH_TOKEN}"}
+    return {}
+
+
 # Prefer the host OS trust store for HTTPS verification so corporate-CA and
 # system-root-CA setups "just work" without relying on Python's bundled certs.
 # Soft import: if `truststore` is not installed on this host we silently fall
@@ -60,7 +87,11 @@ def _attachment_maybe_json(record: dict) -> str | None:
 
 
 def _load_json_url(url: str, timeout_seconds: float) -> dict | None:
-    req = urllib.request.Request(url, method="GET", headers={"Connection": "close"})
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Connection": "close", **_auth_header()},
+    )
     with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     return payload if isinstance(payload, dict) else None
@@ -137,6 +168,7 @@ def _publish_once(cfg: NtfyConfig, topic: str, body: bytes) -> None:
         headers={
             "Content-Type": "text/plain; charset=utf-8",
             "Connection": "close",
+            **_auth_header(),
         },
     )
     with urllib.request.urlopen(req, timeout=cfg.publish_timeout_seconds) as resp:
@@ -207,7 +239,7 @@ def publish_forever(
 def poll_since(cfg: NtfyConfig, topic: str, since: str | None = None) -> list[dict]:
     params = urllib.parse.urlencode({"poll": "1", "since": since or cfg.poll_since})
     url = f"{cfg.server_url.rstrip('/')}/{topic}/json?{params}"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, method="GET", headers=_auth_header())
     envelopes: list[dict] = []
     with urllib.request.urlopen(req, timeout=cfg.poll_http_timeout_seconds) as resp:
         for raw_line in resp:
