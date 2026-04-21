@@ -76,6 +76,12 @@ class ProbesTests(unittest.TestCase):
             self.assertIn(probe.submit_mode, ("relay", "ssh"))
             self.assertIsInstance(probe.implies_ok, tuple)
 
+    def test_echo_probes_avoid_nested_python_quotes(self) -> None:
+        for probe in PROBES:
+            if probe.probe_id.endswith("_echo") or probe.probe_id == "relay_echo":
+                self.assertNotIn("python -c", probe.command)
+                self.assertNotIn("python3 -c", probe.command)
+
 
 class ReportSectionsTests(unittest.TestCase):
     def test_render_html_includes_all_legacy_sections(self) -> None:
@@ -163,6 +169,24 @@ class ProbeDriverTests(unittest.TestCase):
             args = availability_probe.parse_args()
         self.assertEqual(args.mode, availability_probe.MODE_REMOTE)
         self.assertEqual(args.data_dir, "var/availability")
+
+    def test_resolve_probes_pins_single_probe(self) -> None:
+        probes = availability_probe.resolve_probes("relay_echo", None)
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(probes[0].probe_id, "relay_echo")
+
+    def test_resolve_probes_overrides_ssh_host(self) -> None:
+        probes = availability_probe.resolve_probes("ssh_950_echo", "H20")
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(probes[0].probe_id, "ssh_950_echo")
+        self.assertEqual(probes[0].target_host, "H20")
+
+    def test_resolve_probes_overrides_all_ssh_targets_when_unpinned(self) -> None:
+        probes = availability_probe.resolve_probes(None, "H20")
+        relay_probe = next(p for p in probes if p.submit_mode == "relay")
+        ssh_probe = next(p for p in probes if p.submit_mode == "ssh")
+        self.assertEqual(relay_probe.target_host, None)
+        self.assertEqual(ssh_probe.target_host, "H20")
 
 
 if __name__ == "__main__":

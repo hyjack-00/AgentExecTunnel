@@ -32,24 +32,26 @@ Task (submitter → `agent-forward-285`):
 ```json
 {
   "kind": "task",
-  "version": "v0.2",
+  "version": "v0.3",
   "task_id": "20260420T123456Z-abc12345ef01234567890abcd",
   "created_at": "2026-04-20T12:34:56Z",
   "submitter_id": "host:pid",
-  "submit_mode": "relay",
-  "target_host": "H20",
-  "command": "...",
+  "command": "...one plain shell command string...",
   "timeout_seconds": 300,
   "metadata": {}
 }
 ```
+
+**Unified transport** (v0.3): the envelope carries a single `command` string and nothing more. There is no `submit_mode` / `target_host` / routing metadata in the envelope; every flavor of submitter (direct relay, ssh-wrapped, future kubectl/docker/...) renders its own finished command **client-side** and submits it as a plain string. The executor is mode-agnostic — it just runs `task["command"]` via `/bin/sh -c`. `metadata` is an optional audit channel (e.g., `{"ssh_host": "H20"}` for logs).
+
+For ssh-wrapped payloads, the submitter base64-encodes the user's payload and builds a `ssh HOST "bash -c \"$(echo '<b64>' | base64 -d)\""` trampoline so every intermediate shell sees the payload as an atomic literal and **zero quoting layers chew it**. The terminal preview still shows the human-readable `ssh HOST '<payload>'` form — that form is **for humans**, not what goes on the wire.
 
 Result (executor → `agent-backward-285`):
 
 ```json
 {
   "kind": "result",
-  "version": "v0.2",
+  "version": "v0.3",
   "task_id": "...",
   "executor_id": "host:pid",
   "status": "done | failed | stale",

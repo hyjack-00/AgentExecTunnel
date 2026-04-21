@@ -19,8 +19,6 @@ class TaskRecordTests(unittest.TestCase):
             task_id="t1",
             created_at="2026-04-19T00:00:00Z",
             submitter_id="host:1",
-            submit_mode="relay",
-            target_host=None,
             command="echo hi",
             timeout_seconds=300,
         )
@@ -29,20 +27,31 @@ class TaskRecordTests(unittest.TestCase):
         self.assertEqual(envelope["task_id"], "t1")
         self.assertEqual(envelope["command"], "echo hi")
         self.assertEqual(envelope["timeout_seconds"], 300)
-        self.assertEqual(envelope["submit_mode"], "relay")
-        self.assertIsNone(envelope["target_host"])
 
-    def test_envelope_has_no_forward_task_path(self) -> None:
+    def test_envelope_drops_unified_transport_fields(self) -> None:
         task = TaskRecord(
             task_id="t2",
             created_at="2026-04-19T00:00:00Z",
             submitter_id="host:1",
-            submit_mode="relay",
-            target_host=None,
             command="echo hi",
             timeout_seconds=300,
         )
-        self.assertNotIn("forward_task_path", task.to_envelope())
+        envelope = task.to_envelope()
+        # Unified transport — no submit_mode / target_host / forward_task_path
+        self.assertNotIn("submit_mode", envelope)
+        self.assertNotIn("target_host", envelope)
+        self.assertNotIn("forward_task_path", envelope)
+
+    def test_envelope_optional_metadata_passes_through(self) -> None:
+        task = TaskRecord(
+            task_id="t3",
+            created_at="2026-04-19T00:00:00Z",
+            submitter_id="host:1",
+            command="echo hi",
+            timeout_seconds=300,
+            metadata={"ssh_host": "H20"},
+        )
+        self.assertEqual(task.to_envelope()["metadata"], {"ssh_host": "H20"})
 
 
 class ResultRecordTests(unittest.TestCase):
@@ -94,9 +103,9 @@ class ProtocolHelpersTests(unittest.TestCase):
         self.assertEqual(parse_iso_z(iso_z(moment)), moment)
 
     def test_command_digest_is_stable(self) -> None:
-        a = command_digest("echo hi", "relay", None)
-        b = command_digest("echo hi", "relay", None)
-        c = command_digest("echo ho", "relay", None)
+        a = command_digest("echo hi")
+        b = command_digest("echo hi")
+        c = command_digest("echo ho")
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
 

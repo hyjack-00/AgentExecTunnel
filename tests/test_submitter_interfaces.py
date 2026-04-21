@@ -61,11 +61,28 @@ class SubmitterInterfaceTests(unittest.TestCase):
         self.assertEqual(command, f'"{GIT_BASH_EXECUTABLE}" -c "ls -l /c"')
         self.assertEqual(relay_script, "ls -l /c")
 
-    def test_render_gitbash_ssh_command(self) -> None:
+    def test_render_gitbash_ssh_command_uses_base64_wrap(self) -> None:
+        # Transport form: base64-protected ssh command. The payload bytes are
+        # encoded once at the submitter and decoded exactly once on the remote
+        # via `bash -c "$(echo '<b64>' | base64 -d)"`. Every quoting layer in
+        # between is opaque to the user's quotes.
         command, relay_script, wrapped = render_gitbash_ssh_command("H20", 'python3 -c "print(1)"')
-        self.assertEqual(command, f'"{GIT_BASH_EXECUTABLE}" -c "ssh H20 \'python3 -c \\"print(1)\\"\'"')
-        self.assertEqual(relay_script, 'ssh H20 \'python3 -c "print(1)"\'')
+        self.assertTrue(relay_script.startswith('ssh H20 '))
+        self.assertIn('"bash -c', relay_script)
+        self.assertIn('| base64 -d', relay_script)
+        self.assertIn("echo '", relay_script)
+        # Envelope should contain the user's payload exactly once — as the
+        # pre-base64 bytes — recoverable by round-tripping the b64.
+        import base64 as _b64
+        import re
+        m = re.search(r"echo '([A-Za-z0-9+/=]+)'", relay_script)
+        self.assertIsNotNone(m)
+        decoded = _b64.b64decode(m.group(1)).decode("utf-8")
+        self.assertEqual(decoded, 'python3 -c "print(1)"')
+        # `wrapped` stays shlex.quote()-ed payload for human preview use.
         self.assertEqual(wrapped, '\'python3 -c "print(1)"\'')
+        # Windows cmdline wrapping is a deterministic re-escape of relay_script.
+        self.assertTrue(command.startswith(f'"{GIT_BASH_EXECUTABLE}" -c'))
 
     def test_preview_writers_match_legacy_shape(self) -> None:
         stream = io.StringIO()
@@ -105,7 +122,7 @@ class SubmitterInterfaceTests(unittest.TestCase):
              }):
             with redirect_stdout(stdout_stream), redirect_stderr(stderr_stream):
                 with self.assertRaises(SystemExit) as exc:
-                    submit_and_wait("submit_gitbash.py", "echo hello", "relay", 512)
+                    submit_and_wait("submit_gitbash.py", "echo hello", 512)
         self.assertEqual(exc.exception.code, 0)
         publish_task.assert_called_once()
         self.assertIn("SUBMITTED command_id=cmd-123", stdout_stream.getvalue())

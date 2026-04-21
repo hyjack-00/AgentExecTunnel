@@ -34,8 +34,6 @@ def ntfy_config(cfg: Settings) -> NtfyConfig:
 
 def publish_task(
     command: str,
-    submit_mode: str,
-    target_host: str | None = None,
     timeout_seconds: int | None = None,
     metadata: dict | None = None,
     settings: Settings | None = None,
@@ -51,8 +49,6 @@ def publish_task(
         task_id=resolved_task_id,
         created_at=iso_z(now),
         submitter_id=submitter_id or default_submitter_id(),
-        submit_mode=submit_mode,
-        target_host=target_host,
         command=command,
         timeout_seconds=resolved_timeout,
         metadata=metadata or {},
@@ -110,8 +106,6 @@ def wait_for_result(
 
 def submit_task(
     command: str,
-    submit_mode: str,
-    target_host: str | None = None,
     timeout_seconds: int | None = None,
     metadata: dict | None = None,
     settings: Settings | None = None,
@@ -121,8 +115,6 @@ def submit_task(
     cfg = settings or default_settings()
     task_id = publish_task(
         command=command,
-        submit_mode=submit_mode,
-        target_host=target_host,
         timeout_seconds=timeout_seconds,
         metadata=metadata,
         settings=cfg,

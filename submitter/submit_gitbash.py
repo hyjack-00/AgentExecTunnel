@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from submitter._submit_common import MODE_RELAY, require_single_payload, submit_and_wait, write_gitbash_relay_preview
+from submitter._submit_common import require_single_payload, submit_and_wait, write_gitbash_relay_preview
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,7 +31,7 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     write_gitbash_relay_preview("submit_gitbash.py", payload)
-    submit_and_wait("submit_gitbash.py", payload, MODE_RELAY, args.timeout_seconds)
+    submit_and_wait("submit_gitbash.py", payload, args.timeout_seconds)
 
 
 if __name__ == "__main__":

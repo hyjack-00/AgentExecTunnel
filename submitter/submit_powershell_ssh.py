@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from submitter._submit_common import MODE_SSH, require_single_payload, submit_and_wait, write_ssh_preview
+from submitter._submit_common import render_ssh_command, require_single_payload, submit_and_wait, write_ssh_preview
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +32,16 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     write_ssh_preview("submit_powershell_ssh.py", args.host, payload)
-    submit_and_wait("submit_powershell_ssh.py", payload, MODE_SSH, args.timeout_seconds, target_host=args.host)
+    # Client-side ssh wrap: render the full `powershell.exe -EncodedCommand`
+    # line locally so the envelope carries one plain command string. Executor
+    # just runs it — no ssh-specific code path on the executor side.
+    powershell_cmd, _relay_script, _wrapped = render_ssh_command(args.host, payload)
+    submit_and_wait(
+        "submit_powershell_ssh.py",
+        powershell_cmd,
+        args.timeout_seconds,
+        metadata={"ssh_host": args.host},
+    )
 
 
 if __name__ == "__main__":

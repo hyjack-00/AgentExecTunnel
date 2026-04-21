@@ -18,8 +18,6 @@ from agent_exec_tunnel.ntfy_transport import NtfyPublishError, wait_for
 from agent_exec_tunnel.protocol import new_task_id
 from agent_exec_tunnel.submitter import ntfy_config, publish_task
 
-MODE_RELAY = "relay"
-MODE_SSH = "ssh"
 POWERSHELL_EXECUTABLE = os.environ.get("AET_POWERSHELL_EXECUTABLE", "powershell.exe")
 GIT_BASH_EXECUTABLE = os.environ.get("AET_GIT_BASH_EXECUTABLE", r"C:\Program Files\Git\bin\bash.exe")
 DEFAULT_EXIT_TIMEOUT = 124
@@ -56,9 +54,29 @@ def render_gitbash_relay_command(payload: str) -> tuple[str, str]:
 
 
 def render_gitbash_ssh_command(host: str, payload: str) -> tuple[str, str, str]:
+    """Return (windows_cmdline, relay_script, wrapped_target).
+
+    `relay_script` is what gets submitted as the task command and what the
+    executor eventually runs (via /bin/sh -c on Linux). We base64-encode the
+    payload so the content can survive every intermediate shell parse layer
+    unchanged — neither executor sh nor the remote shell ever "sees" the
+    user's quoting. The remote shell uses `bash -c "$(echo '<b64>' | base64 -d)"`
+    to evaluate the decoded payload exactly once.
+
+    `wrapped_target` is the single-quoted human-readable form of the payload,
+    preserved only because `write_gitbash_ssh_preview` prints it.
+    """
+    b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    relay_script = (
+        f"ssh {shlex.quote(host)} "
+        f"\"bash -c \\\"\\$(echo '{b64}' | base64 -d)\\\"\""
+    )
     wrapped_target = shlex.quote(payload)
-    relay_script = f"ssh {host} {wrapped_target}"
-    return subprocess.list2cmdline([GIT_BASH_EXECUTABLE, "-c", relay_script]), relay_script, wrapped_target
+    return (
+        subprocess.list2cmdline([GIT_BASH_EXECUTABLE, "-c", relay_script]),
+        relay_script,
+        wrapped_target,
+    )
 
 
 def require_single_payload(parts: list[str], error_prefix: str) -> str:
@@ -96,9 +114,14 @@ def write_gitbash_relay_preview(label: str, payload: str) -> None:
 
 
 def write_gitbash_ssh_preview(label: str, host: str, payload: str) -> None:
-    command, relay_script, _wrapped_target = render_gitbash_ssh_command(host, payload)
-    sys.stdout.write(f"-> {command}\n")
-    sys.stdout.write(f"  -> {relay_script}\n")
+    # Preview is **for humans**. We keep the legacy shape here even though the
+    # transport now wraps the payload in base64 under the hood — operators
+    # reading the terminal see `ssh HOST '<payload>'` and can reason about
+    # the intended semantics, not the encoded form.
+    human_relay = f"ssh {host} {shlex.quote(payload)}"
+    human_windows = subprocess.list2cmdline([GIT_BASH_EXECUTABLE, "-c", human_relay])
+    sys.stdout.write(f"-> {human_windows}\n")
+    sys.stdout.write(f"  -> {human_relay}\n")
     sys.stdout.write(f"    -> {payload}\n")
     sys.stdout.flush()
 
@@ -161,9 +184,8 @@ def _exit_from_payload(payload: dict) -> None:
 def submit_and_wait(
     label: str,
     command: str,
-    submit_mode: str,
     timeout_seconds: int | None,
-    target_host: str | None = None,
+    metadata: dict | None = None,
 ) -> None:
     cfg = default_settings()
     timeout = timeout_seconds if timeout_seconds is not None else cfg.default_timeout_seconds
@@ -171,9 +193,8 @@ def submit_and_wait(
     try:
         publish_task(
             command=command,
-            submit_mode=submit_mode,
-            target_host=target_host,
             timeout_seconds=timeout,
+            metadata=metadata,
             settings=cfg,
             task_id=command_id,
             emit_submitted=False,

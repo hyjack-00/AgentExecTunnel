@@ -21,8 +21,6 @@ def _make_envelope(
         "task_id": task_id,
         "created_at": created_at or iso_z(utc_now()),
         "submitter_id": "host:1",
-        "submit_mode": "relay",
-        "target_host": None,
         "command": command,
         "timeout_seconds": timeout_seconds,
         "metadata": {},

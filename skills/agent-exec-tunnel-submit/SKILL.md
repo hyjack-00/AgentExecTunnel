@@ -7,7 +7,9 @@ description: Submit one non-streaming command or upload one shared file set thro
 
 This skill is for **executing commands through the tunnel** or **uploading shared files**. Use this skill from the repository root at `/workspace/AgentExecTunnel`.
 
-As of v0.2, task envelopes and result envelopes flow over ntfy.sh (topics `agent-forward-285` / `agent-backward-285`). File uploads still go through the `agent_forward` git repo. Task / result transport does not involve git at all.
+As of v0.2+, task envelopes and result envelopes flow over ntfy.sh (topics `agent-forward-285` / `agent-backward-285`). File uploads still go through the `agent_forward` git repo. Task / result transport does not involve git at all.
+
+Note: the terminal "preview" output below is **for humans**. The actual command on the wire may be encoded/wrapped to protect quoting; the preview shows the semantic intent of the command, not the literal bytes transmitted.
 
 ## Tunnel
 
@@ -101,16 +103,11 @@ Git bash ssh for remote-host command:
 python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'
 ```
 
-PowerShell relay with nested quoting:
-
-```bash
-python3 submitter/submit_powershell.py '$items = @("A","B"); $items | ForEach-Object { Write-Output ("item=""{0}""" -f $_) }'
-```
-
-Git Bash ssh with shell quoting, pipe, semicolon, and embedded Python code:
+Git Bash ssh with shell quoting, pipe, semicolon, and embedded Python code (all quoting is preserved end-to-end):
 
 ```bash
 python3 submitter/submit_gitbash_ssh.py H20 'printf "%s\n" "$HOME"; ls / | head -5; echo done'
+python3 submitter/submit_gitbash_ssh.py H20 'python3 -c "print(\"hello\nworld\")"'
 python3 submitter/submit_gitbash_ssh.py H20 'python3 -c '"'"'import json; print(json.dumps({"path":"/tmp/demo","text":"A\"B","items":["x","y"]}))'"'"''
 ```
 
@@ -133,17 +130,16 @@ It does this:
 File upload and verification example:
 
 ```bash
-python3 submitter/submit_files.py --name local_dir_demo --src ./local_dir
-python3 submitter/submit_gitbash.py 'scp -r ./agent_forward/files/local_dir_demo H20:/tmp/remote_dir_demo'
-python3 submitter/submit_gitbash_ssh.py H20 'ls /tmp/remote_dir_demo'
+python3 submitter/submit_files.py --name transfer_demo --src ./skills
+python3 submitter/submit_gitbash.py 'scp -r ./agent_forward/files/transfer_demo/skills H20:/tmp/transfer_demo'
+python3 submitter/submit_gitbash_ssh.py H20 'ls /tmp/transfer_demo'
 ```
 
 ## What This Skill Does
 
-- `agent_forward` stores submitted tasks and shared uploaded files
-- `agent_backward` stores final results
-- Submitter writes `agent_forward` and reads `agent_backward`
-- Executor reads `agent_forward` and writes `agent_backward`
-- Submitter publish commands with limited retries and may failed due to local timeout. 
-- Executor publish results with best effort, but results may never arrive to submitter due to local or remote timeout.
-- Executor never hard-kill actively tracked tasks, however, a timeout command will not have its result published back.
+- Task / result envelopes ride ntfy.sh topics `agent-forward-285` (submit → executor) and `agent-backward-285` (executor → submit). No git on the message path.
+- Only `agent_forward` git repo is involved — for file uploads under `agent_forward/files/<namespace>/...`.
+- The envelope carries **one plain command string**; every submitter flavor (gitbash / gitbash-ssh / powershell / ...) renders its own wrapping client-side. Executor is mode-agnostic.
+- Submitter publish has bounded retry; on final failure you see `publish rejected; command was not published` and exit 1.
+- Executor publishes results with infinite retry (blocks the worker thread until ntfy accepts); results rarely disappear unless the executor itself is killed mid-publish.
+- Executor never hard-kills actively tracked tasks; a timeout emits a `stale` result and leaves the subprocess detached.

@@ -9,8 +9,9 @@ Traffic shape:
     burst peak:       `--burst-peak-rps` during short bursts (default 5)
     burst duration:   uniform in [burst_min, burst_max]
 
-On each heartbeat we pick a probe uniformly at random from
-`tests.availability.probes.PROBES`, run it through the real submitter script,
+On each heartbeat we pick a probe uniformly at random from the active probe
+set (all presets by default, or one pinned probe via `--probe-id`), run it
+through the real submitter script,
 and append one JSONL record under `--data-dir/data-YYYYMMDD.jsonl`. Files older
 than 1 day are pruned after every append. A report is regenerated every
 `--report-interval` seconds and at shutdown.
@@ -35,7 +36,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.availability import report as report_mod, storage
-from tests.availability.probes import PROBES, ProbeSpec
+from tests.availability.probes import DEFAULT_PROBES, PROBES, ProbeSpec
 
 MODE_LOCAL = "local_relay"
 MODE_REMOTE = "remote_relay"
@@ -182,6 +183,26 @@ def run_once(probe: ProbeSpec, mode: str, submitter_timeout_seconds: int, subpro
     return rec
 
 
+def resolve_probes(probe_id: str | None, ssh_host: str | None) -> tuple[ProbeSpec, ...]:
+    if probe_id is None:
+        if ssh_host is None:
+            return PROBES
+        resolved: list[ProbeSpec] = []
+        for probe in PROBES:
+            if probe.submit_mode != "ssh":
+                resolved.append(probe)
+                continue
+            resolved.append(ProbeSpec(**{**probe.__dict__, "target_host": ssh_host}))
+        return tuple(resolved)
+    probe = DEFAULT_PROBES.get(probe_id)
+    if probe is None:
+        known = ", ".join(sorted(DEFAULT_PROBES))
+        raise ValueError(f"unknown probe_id={probe_id!r}; known probes: {known}")
+    if ssh_host is not None and probe.submit_mode == "ssh":
+        probe = ProbeSpec(**{**probe.__dict__, "target_host": ssh_host})
+    return (probe,)
+
+
 class BurstState:
     """Tracks Bernoulli burst entry and in-burst emission scheduling."""
 
@@ -246,6 +267,7 @@ def _install_signal_handlers():
 def run_loop(
     root: Path,
     mode: str,
+    probes: tuple[ProbeSpec, ...],
     mean_period: float,
     burst_peak_rps: float,
     burst_min: float,
@@ -259,7 +281,8 @@ def run_loop(
     burst = BurstState(mean_period, burst_peak_rps, burst_min, burst_max)
     print(
         f"[probe] started mode={mode} mean_period={mean_period}s burst_peak={burst_peak_rps}rps "
-        f"submitter_timeout={submitter_timeout_seconds}s subprocess_timeout={subprocess_hard_timeout}s data_dir={root}",
+        f"submitter_timeout={submitter_timeout_seconds}s subprocess_timeout={subprocess_hard_timeout}s "
+        f"probes={','.join(p.probe_id for p in probes)} data_dir={root}",
         flush=True,
     )
     storage.prune_old(root, retention_days=1)
@@ -270,7 +293,7 @@ def run_loop(
         tick += 1
         phase = burst.tick()
         if phase is not None:
-            probe = random.choice(PROBES)
+            probe = random.choice(probes)
             rec = run_once(probe, mode, submitter_timeout_seconds, subprocess_hard_timeout)
             rec["phase"] = phase
             storage.append_record(root, rec)
@@ -322,9 +345,11 @@ def main() -> int:
     if args.seed is not None:
         random.seed(args.seed)
     root = Path(args.data_dir)
+    probes = resolve_probes(args.probe_id, args.ssh_host)
     run_loop(
         root=root,
         mode=args.mode,
+        probes=probes,
         mean_period=args.mean_period,
         burst_peak_rps=args.burst_peak_rps,
         burst_min=args.burst_duration_min,

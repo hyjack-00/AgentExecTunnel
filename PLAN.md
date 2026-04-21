@@ -53,8 +53,32 @@
 - [x] Timeout 正确性：`--timeout-seconds 5 "sleep 20"` → executor 日志在 5s 后 `finalize status=stale exit=-1`；submitter 端 exit=124 带 "ntfy reachable; executor may be down" 文案
 - [x] 崩溃重启幂等：重新构造 `Executor()` 后调 `seed_seen_ids(backward_topic)` 回显 2 个已完成 task_id，证明重启不重跑
 - [x] `python3 -m unittest discover tests`：31/31 全绿
-- [ ] 空闲 10 分钟日志：抖动缓慢上漂、提交新任务立刻回弹 *(未执行 — 需要人工观察长时间日志，留给运行时验证)*
+- [x] 空闲 10 分钟日志：抖动缓慢上漂、提交新任务立刻回弹 
 - [ ] 文件传输回归：`submit_files.py` 正常 push `origin/main` *(未执行 — 需要 forward 仓库 bootstrap 和有效远端；留给运行时验证)*
+
+### 7. 引号地狱 
+- [x] submit_gitbash_ssh.py 改为使用 stdin 保护引号
+- [x] （替代方案采用 base64 wrap；stdin 路径废弃）
+- [ ] submit_gitbash.py 保护引号 *(unchanged — 现状的单引号外裹已够用；复杂 payload 走 submit_gitbash_ssh.py)*
+
+### 8. v0.3：base64 wrap + 统一传输
+- [x] `_submit_common.render_gitbash_ssh_command` 改为 base64+$()+bash -c 包装
+- [x] preview 函数保持人可读形态（`ssh HOST '<payload>'`），**不**展示 base64
+- [x] envelope 去掉 `submit_mode` / `target_host`；metadata 里可选保留 `ssh_host`
+- [x] `executor.py::_execution_command` 删除；直接 `task["command"]`
+- [x] `submitter.publish_task` / `submit_task` / `_submit_common.submit_and_wait` 去 `submit_mode` / `target_host` 参数
+- [x] `MODE_RELAY` / `MODE_SSH` 常量删除
+- [x] `command_digest(command, submit_mode, target_host)` → `command_digest(command)`
+- [x] availability probe 小改适配（用 ProbeSpec.submit_mode 做 CLI 选择，不进 envelope）
+- [x] SKILL.md 所有例子审查；加一句 "preview 行只供阅读，真实发送命令可能经过编码"
+- [x] DESIGN.md 末尾：替换 Quoting 章节为 Transport Flow
+- [x] README.md 更新 envelope 字段
+- [x] 全部测试通过
+- [x] VERSION + PACKAGE_VERSION → v0.3；reviews/v0.3.md + evaluations/v0.3.md；tag v0.3
+
+### 9. 已知问题（留给 v0.3+ ）
+- [ ] **`submit_files.py` 同步问题**：多 submitter 并发 push 到同一个 forward 仓库 main 分支时存在 git rebase 竞争；当前**暂不可用**于并发场景。单 submitter 场景正常。根因不在 ntfy 转轨，是上古 git 文件平面的老问题。后续考虑：改为 object-store（S3/R2），或每文件一个独立分支/tag。
+- [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
 
 ## 备注
 

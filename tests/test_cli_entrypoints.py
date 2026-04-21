@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agent_exec_tunnel.config import default_settings
-from submitter import submit_files, submit_gitbash
+from submitter import submit_files, submit_gitbash, submit_gitbash_ssh
 
 ROOT = Path(__file__).resolve().parents[1]
 _bootstrap_spec = importlib.util.spec_from_file_location(
@@ -38,7 +38,28 @@ class CliEntrypointTests(unittest.TestCase):
              mock.patch("submitter.submit_gitbash.submit_and_wait") as submit:
             submit_gitbash.main()
         preview.assert_called_once_with("submit_gitbash.py", "echo hello")
-        submit.assert_called_once_with("submit_gitbash.py", "echo hello", "relay", 300)
+        submit.assert_called_once_with("submit_gitbash.py", "echo hello", 300)
+
+    def test_submit_gitbash_ssh_main_submits_rendered_ssh_command(self) -> None:
+        # submit_gitbash_ssh.py renders the ssh wrap client-side and submits
+        # one plain command string — no submit_mode / target_host in envelope.
+        payload = 'python3 -c "print(\\"hello\\nworld\\")"'
+        with mock.patch.object(sys, "argv", ["submit_gitbash_ssh.py", "H20", payload]), \
+             mock.patch("submitter.submit_gitbash_ssh.write_gitbash_ssh_preview") as preview, \
+             mock.patch("submitter.submit_gitbash_ssh.submit_and_wait") as submit:
+            submit_gitbash_ssh.main()
+        preview.assert_called_once_with("submit_gitbash_ssh.py", "H20", payload)
+        submit.assert_called_once()
+        call_args = submit.call_args
+        self.assertEqual(call_args.args[0], "submit_gitbash_ssh.py")
+        submitted_cmd = call_args.args[1]
+        # Client-side base64 wrap: command starts with `ssh H20 "bash -c …"`
+        # and contains an `echo '...' | base64 -d` decoding trampoline.
+        self.assertTrue(submitted_cmd.startswith("ssh H20 "))
+        self.assertIn("base64 -d", submitted_cmd)
+        self.assertIn('"bash -c', submitted_cmd)
+        self.assertEqual(call_args.args[2], 300)
+        self.assertEqual(call_args.kwargs, {"metadata": {"ssh_host": "H20"}})
 
     def test_submit_files_main_uploads_into_forward_files_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

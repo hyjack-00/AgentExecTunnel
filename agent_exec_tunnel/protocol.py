@@ -34,15 +34,8 @@ def new_task_id(now: datetime | None = None) -> str:
     return f"{base}-{digest}{jitter}"
 
 
-def command_digest(command: str, submit_mode: str, target_host: str | None) -> str:
-    material = json.dumps(
-        {
-            "command": command,
-            "submit_mode": submit_mode,
-            "target_host": target_host,
-        },
-        sort_keys=True,
-    ).encode()
+def command_digest(command: str) -> str:
+    material = json.dumps({"command": command}, sort_keys=True).encode()
     return hashlib.sha256(material).hexdigest()
 
 
@@ -51,8 +44,6 @@ class TaskRecord:
     task_id: str
     created_at: str
     submitter_id: str
-    submit_mode: str
-    target_host: str | None
     command: str
     timeout_seconds: int
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -65,8 +56,6 @@ class TaskRecord:
             "task_id": self.task_id,
             "created_at": self.created_at,
             "submitter_id": self.submitter_id,
-            "submit_mode": self.submit_mode,
-            "target_host": self.target_host,
             "command": self.command,
             "timeout_seconds": self.timeout_seconds,
             "metadata": self.metadata,

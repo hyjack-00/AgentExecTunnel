@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import json
 import time
 import unittest
 from unittest import mock
 
-from agent_exec_tunnel.ntfy_transport import NtfyConfig, _colorize_retry, poll_loop, wait_for
+from agent_exec_tunnel.ntfy_transport import (
+    NtfyConfig,
+    _attachment_maybe_json,
+    _colorize_retry,
+    _record_to_envelope,
+    poll_since,
+    poll_loop,
+    wait_for,
+)
 
 
 class RetryLogFormattingTests(unittest.TestCase):
@@ -16,6 +25,66 @@ class RetryLogFormattingTests(unittest.TestCase):
         self.assertIn("\033[2;33m", first)
         self.assertIn("\033[31m", fourth)
         self.assertIn("\033[1;31m", sixth)
+
+
+class AttachmentEnvelopeTests(unittest.TestCase):
+    def test_attachment_maybe_json_accepts_json_url(self) -> None:
+        record = {"attachment": {"url": "https://ntfy.sh/file/abc.json"}}
+        self.assertEqual(_attachment_maybe_json(record), "https://ntfy.sh/file/abc.json")
+
+    def test_record_to_envelope_prefers_message_json(self) -> None:
+        record = {"message": '{"task_id":"t1","kind":"result"}'}
+        envelope = _record_to_envelope(record, 1.0)
+        self.assertEqual(envelope, {"task_id": "t1", "kind": "result"})
+
+    def test_record_to_envelope_falls_back_to_attachment_json(self) -> None:
+        record = {
+            "message": "ntfy.sh/file/n1kJDmosirRm.json",
+            "attachment": {"url": "https://ntfy.sh/file/n1kJDmosirRm.json", "type": "application/json"},
+        }
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport._load_json_url",
+            return_value={"task_id": "t1", "kind": "result", "status": "done"},
+        ) as load_json:
+            envelope = _record_to_envelope(record, 5.0)
+        load_json.assert_called_once_with("https://ntfy.sh/file/n1kJDmosirRm.json", 5.0)
+        self.assertEqual(envelope, {"task_id": "t1", "kind": "result", "status": "done"})
+
+    def test_poll_since_loads_result_from_attachment_json(self) -> None:
+        class FakeResponse:
+            def __init__(self, lines: list[bytes] | None = None, body: bytes = b"") -> None:
+                self._lines = lines or []
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter(self._lines)
+
+            def read(self) -> bytes:
+                return self._body
+
+        record = {
+            "event": "message",
+            "message": "https://ntfy.sh/file/n1kJDmosirRm.json",
+            "attachment": {"url": "https://ntfy.sh/file/n1kJDmosirRm.json", "type": "application/json"},
+        }
+        ndjson = json.dumps(record).encode("utf-8") + b"\n"
+        attachment_payload = json.dumps({"task_id": "t1", "kind": "result", "status": "done"}).encode("utf-8")
+        responses = [
+            FakeResponse(lines=[ndjson]),
+            FakeResponse(body=attachment_payload),
+        ]
+
+        with mock.patch("urllib.request.urlopen", side_effect=responses) as urlopen_mock:
+            envelopes = poll_since(NtfyConfig(), "agent-backward-285", since="30m")
+
+        self.assertEqual(envelopes, [{"task_id": "t1", "kind": "result", "status": "done"}])
+        self.assertEqual(urlopen_mock.call_count, 2)
 
 
 class PollLoopRetryLoggingTests(unittest.TestCase):

@@ -41,6 +41,49 @@ class NtfyPublishError(RuntimeError):
     pass
 
 
+def _attachment_maybe_json(record: dict) -> str | None:
+    attachment = record.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+    url = attachment.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    name = attachment.get("name")
+    mime_type = attachment.get("type")
+    if isinstance(mime_type, str) and "json" in mime_type.lower():
+        return url
+    if isinstance(name, str) and name.lower().endswith(".json"):
+        return url
+    if url.lower().endswith(".json"):
+        return url
+    return None
+
+
+def _load_json_url(url: str, timeout_seconds: float) -> dict | None:
+    req = urllib.request.Request(url, method="GET", headers={"Connection": "close"})
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    return payload if isinstance(payload, dict) else None
+
+
+def _record_to_envelope(record: dict, timeout_seconds: float) -> dict | None:
+    message = record.get("message")
+    if isinstance(message, str) and message:
+        try:
+            envelope = json.loads(message)
+        except json.JSONDecodeError:
+            envelope = None
+        if isinstance(envelope, dict):
+            return envelope
+    attachment_url = _attachment_maybe_json(record)
+    if not attachment_url:
+        return None
+    try:
+        return _load_json_url(attachment_url, timeout_seconds)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 def _supports_color() -> bool:
     return os.environ.get("TERM", "").lower() not in ("", "dumb")
 
@@ -177,13 +220,7 @@ def poll_since(cfg: NtfyConfig, topic: str, since: str | None = None) -> list[di
                 continue
             if record.get("event") != "message":
                 continue
-            message = record.get("message")
-            if not isinstance(message, str) or not message:
-                continue
-            try:
-                envelope = json.loads(message)
-            except json.JSONDecodeError:
-                continue
+            envelope = _record_to_envelope(record, cfg.poll_http_timeout_seconds)
             if isinstance(envelope, dict):
                 envelopes.append(envelope)
     return envelopes

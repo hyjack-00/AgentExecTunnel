@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import socket
 import subprocess
 import threading
@@ -277,7 +276,7 @@ class Executor:
         deadline_at = started_at_dt + timedelta(seconds=int(task["timeout_seconds"]))
         try:
             process = subprocess.Popen(
-                self._execution_command(task),
+                task["command"],
                 shell=True,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -405,11 +404,7 @@ class Executor:
         process_ref: str | None,
         stale_at: str | None = None,
     ) -> None:
-        digest = command_digest(
-            task.get("command", ""),
-            task.get("submit_mode", ""),
-            task.get("target_host"),
-        )
+        digest = command_digest(task.get("command", ""))
         result = ResultRecord(
             task_id=task["task_id"],
             executor_id=self.executor_id,
@@ -435,15 +430,6 @@ class Executor:
             done = self.worker_done.setdefault(task_id, threading.Event())
             done.set()
         self.log(f"finalize {task['task_id']} status={status} exit={exit_code} published={published}")
-
-    @staticmethod
-    def _execution_command(task: dict) -> str:
-        if task["submit_mode"] == "ssh":
-            host = task.get("target_host")
-            if not host:
-                raise RuntimeError(f"ssh task missing target_host task_id={task['task_id']}")
-            return f"ssh {shlex.quote(host)} {shlex.quote(task['command'])}"
-        return task["command"]
 
     def wait_for_task(self, task_id: str, timeout: float = 10.0) -> bool:
         with self._state_lock:

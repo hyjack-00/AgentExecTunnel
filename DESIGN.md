@@ -43,17 +43,17 @@ Task envelope (published to the forward topic):
 ```json
 {
   "kind": "task",
-  "version": "v0.2",
+  "version": "v0.3",
   "task_id": "<utc-compact>-<sha1-8><rand-16>",
   "created_at": "<iso>",
   "submitter_id": "host:pid",
-  "submit_mode": "relay|ssh",
-  "target_host": "<host or null>",
   "command": "...",
   "timeout_seconds": 300,
   "metadata": {}
 }
 ```
+
+**Unified transport (v0.3):** the envelope carries **one plain command string**. No `submit_mode`, no `target_host`. Every submitter CLI (`submit_gitbash.py`, `submit_gitbash_ssh.py`, `submit_powershell*.py`, …) renders its own wrapping **client-side** and submits the finished command. The executor is agnostic — it only sees `task["command"]` and runs it via `/bin/sh -c`. Optional `metadata` (e.g. `{"ssh_host": "H20"}`) is for audit / display only; the executor ignores it.
 
 ACK envelope (published to the backward topic by the executor **before** it spawns the worker subprocess):
 
@@ -162,3 +162,56 @@ Executor-only hosts (the common deployment) do **not** need the `agent_forward` 
 ## Availability monitoring
 
 `tests/availability/` drives the real submitter CLIs on a randomized schedule (burst + quiet-tick Bernoulli) and writes records into JSONL. `tests/availability/report.py` renders an HTML dashboard with hop cards (by `implies_ok` tag), p50/p95/p99 latency, preview + total stage timings, a 24h hourly SVG heartbeat, per-probe table, and recent failures. See `tests/availability/README.md` for operation and `tests/availability/ssh` for the `local_relay`-mode ssh shim.
+
+## Transport flow (v0.3)
+
+The quoting history: chaining `user bash → executor sh -c → ssh argv join → remote shell -c → command shell` produces up to 5 shell-parse layers. Every layer chews one `\`. For any non-trivial payload this balloons into `\\\\\\\"`-level escaping that no human can maintain. We solve it by **base64-encoding the user's payload at the submitter**, wrapping it in an inert `bash -c "$(echo '<b64>' | base64 -d)"` trampoline, and letting every intermediate shell see the base64 blob as one atomic literal — the payload bytes **are not parsed by any shell** except the final one that runs them.
+
+### End-to-end for `submit_gitbash_ssh.py H20 '<payload>'`
+
+```
+USER                        SUBMITTER (client)                EXECUTOR (sh -c)          SSH client            REMOTE BASH
+──────                      ──────────────────                ────────────────          ──────────            ───────────
+payload bytes          ──▶  base64(payload) = <B64>       ──▶ sh parses:            ──▶ stdin: argv[2..]  ──▶ $SHELL -c "<received>"
+(single-quote outer;        relay =                           ssh LOCAL              ─▶ pure byte join,     parses dquoted $() :
+ bash passes through)       ssh HOST                          "bash -c …$()…"        no re-quoting         runs subshell
+                              "bash -c                        (0 payload chars                             echo '<B64>' | base64 -d
+                                 \"\$(echo '<B64>'             consumed — <B64>                            → decoded = <payload>
+                                  | base64 -d)\""              lives in '…')                               bash -c <payload>
+                            envelope:                                                                      ↓
+                              { "kind":"task",                                                             FINAL SHELL PARSE
+                                "command": relay,                                                          (the only layer that
+                                ... }                                                                      reads user bytes)
+                            publish to ntfy forward                                                        ↓
+                                                                                                           exec <user command>
+```
+
+**Parse-count table** (layers that read the payload's bytes):
+
+| Layer | Sees payload? | Consumes quotes? |
+|---|---|---|
+| User's outer bash | ✓ (but single-quote shields it) | 0 |
+| Submitter encoder (base64) | — (pure byte transform) | 0 |
+| JSON + ntfy over the wire | — (opaque) | 0 |
+| Executor `sh -c <relay>` | payload lives inside `'<B64>'` literal | 0 |
+| SSH client argv join | — (byte concat) | 0 |
+| Remote `$SHELL -c` parsing `bash -c "$(…)"` | `$()` decodes; result not re-parsed | 0 |
+| Remote `bash -c <decoded>` | **this one parses `<payload>` as shell source** | **1** |
+
+Total: **1 shell parse of the payload**, which is exactly what the user expects when they write shell code.
+
+### Preview output is for humans
+
+The submitter CLIs still print the legacy three-line human-readable preview:
+
+```
+-> "C:\Program Files\Git\bin\bash.exe" -c "ssh H20 'python3 -c ...'"
+  -> ssh H20 'python3 -c "print(\"hello\nworld\")"'
+    -> python3 -c "print(\"hello\nworld\")"
+```
+
+**This preview does not represent what the executor actually runs** — the real command is the base64-wrapped form. The preview exists for operator comprehension: reading `ssh HOST '<payload>'` makes the intent obvious. Inspect the actual wire command from `agent_exec_tunnel.submitter._submit_common.render_gitbash_ssh_command(host, payload)` if a bug manifests downstream.
+
+### What the unified envelope means for other tools
+
+Because there is only one command field on the wire, any future submitter (`submit_kubectl.py`, `submit_docker_exec.py`, `submit_from_stdin.py`, …) plugs in the same way: render a plain `str` client-side, call `submit_and_wait(label, command, timeout, metadata=…)`. The executor is never aware of the flavor.

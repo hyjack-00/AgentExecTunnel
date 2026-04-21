@@ -9,7 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from submitter._submit_common import MODE_SSH, require_single_payload, submit_and_wait, write_gitbash_ssh_preview
+from submitter._submit_common import (
+    render_gitbash_ssh_command,
+    require_single_payload,
+    submit_and_wait,
+    write_gitbash_ssh_preview,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +37,16 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     write_gitbash_ssh_preview("submit_gitbash_ssh.py", args.host, payload)
-    submit_and_wait("submit_gitbash_ssh.py", payload, MODE_SSH, args.timeout_seconds, target_host=args.host)
+    # Client-side ssh wrap: render the base64-protected relay command here so
+    # the envelope carries ONE plain command string. The executor has no
+    # ssh-specific code path — it just runs whatever command it receives.
+    _win, relay_script, _wrapped = render_gitbash_ssh_command(args.host, payload)
+    submit_and_wait(
+        "submit_gitbash_ssh.py",
+        relay_script,
+        args.timeout_seconds,
+        metadata={"ssh_host": args.host},
+    )
 
 
 if __name__ == "__main__":
