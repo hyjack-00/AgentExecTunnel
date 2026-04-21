@@ -122,10 +122,18 @@
 - [x] 文档：README Configuration + DESIGN.md "No auth" → "partially closed in v0.3.3"
 - [x] VERSION → v0.3.3、reviews + evaluations、tag v0.3.3
 
-### 9. 已知问题（留给 v0.3+ ）
-- [ ] `submit_files.py`
-- [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
-- [ ] executor 也需要识别附件化的大附件文件消息，需要将读取逻辑在 exe & sub 之间通用化
+### 9. 已知问题 & 已解决项备忘
+
+**未解决（留给 v0.4+）**：
+
+- [ ] **`submit_files.py` 并发 push 同步问题**：多 submitter 并发向同一 `agent_forward` main 分支 push 会撞 rebase/push 循环；单 submitter 场景正常。根因是 git 文件平面的老问题，与 ntfy 转轨无关。后续可选：改 object-store（S3/R2）或每文件一个独立分支/tag。
+
+- [ ] **v0.4 candidates**（打包一次性做）— 远端 `base64` 缺失的 silent success 保护、`$(…)` 吃尾换行的文档 / 替代蹦床、ARG_MAX pre-flight、`submit_powershell_ssh.py` 也 base64 化、host 前缀 `-` 的 ssh option 注入、`AET_SHOW_WIRE=1` 调试开关。`tools/test_remote_relay.py` 的 preview-stripper 用 `SUBMITTED command_id=…` 行作为 anchor（当前用前缀匹配，payload 内容如果撞上 `  -> ` 会误剥）。
+
+**已解决（此前记在 §9 但其实已做完）**：
+
+- [x] ~~"submit_gitbash.py 外层要不要 base64"~~ — v0.3.2 之后无意义：submit_gitbash.py 提交 raw payload，executor `bash -c <payload>` 只做 1 层 shell 解析，用户单引号外裹就够；再加 base64 会和 submit_gitbash_ssh.py 重复。**无需动作**。
+- [x] ~~"executor 也要识别附件化的大附件消息，读取逻辑需在 exe & sub 之间通用化"~~ — 早已集中在 `agent_exec_tunnel/ntfy_transport.py::_record_to_envelope` + `_attachment_maybe_json` + `_load_json_url`。`poll_since()` 是 submitter（`wait_for`）和 executor（`poll_loop` / `seed_seen_ids`）**共用**的入口，attachment 自动解析。**已通用化**。
 
 ### 10. v0.4 候选：其余 deferred 一次性做完
 **动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。
