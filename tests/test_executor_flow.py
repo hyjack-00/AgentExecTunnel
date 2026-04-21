@@ -33,6 +33,31 @@ def _kinds(pub_mock) -> list[str]:
     return [call.args[2].get("kind") for call in pub_mock.call_args_list]
 
 
+class ExecutorShellConfigTests(unittest.TestCase):
+    def test_executor_popen_uses_configured_shell_with_shell_false(self) -> None:
+        """v0.3.2: executor must run Popen([shell, *args, cmd], shell=False),
+        never Popen(cmd, shell=True). This is the whole point of the shell
+        override — skip cmd.exe on Windows / /bin/sh on Linux."""
+        executor = Executor()
+        with mock.patch("agent_exec_tunnel.executor.publish_forever", return_value=True), \
+             mock.patch("agent_exec_tunnel.executor.subprocess.Popen") as popen_mock:
+            popen_mock.return_value.poll.return_value = 0
+            popen_mock.return_value.pid = 1234
+            popen_mock.return_value.stdout = None
+            popen_mock.return_value.stderr = None
+            executor._handle_task_envelope(_make_envelope(task_id="shell-check", command="echo hi"))
+            self.assertTrue(executor.wait_for_task("shell-check", timeout=5.0))
+        # First positional arg: argv list [shell, *args, cmd].
+        # shell=False must be set.
+        call = popen_mock.call_args
+        argv = call.args[0]
+        self.assertIsInstance(argv, list)
+        self.assertEqual(argv[0], executor.settings.executor_shell)
+        self.assertEqual(argv[1:-1], list(executor.settings.executor_shell_args))
+        self.assertEqual(argv[-1], "echo hi")
+        self.assertIs(call.kwargs.get("shell"), False)
+
+
 class HandleTaskEnvelopeTests(unittest.TestCase):
     def test_valid_task_publishes_ack_then_result(self) -> None:
         executor = Executor()

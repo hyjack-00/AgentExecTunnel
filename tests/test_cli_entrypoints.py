@@ -10,7 +10,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agent_exec_tunnel.config import default_settings
-from submitter import submit_bash, submit_files, submit_gitbash, submit_gitbash_ssh, submit_powershell
+from submitter import (
+    submit as submit_plain,
+    submit_bash,
+    submit_files,
+    submit_gitbash,
+    submit_gitbash_ssh,
+    submit_powershell,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 _bootstrap_spec = importlib.util.spec_from_file_location(
@@ -32,29 +39,31 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(settings.ntfy_backward_topic, "agent-backward-285")
         self.assertEqual(settings.default_timeout_seconds, 300)
 
-    def test_submit_gitbash_main_submits_wrapped_windows_cmdline(self) -> None:
-        # Windows-executor path: the envelope command must start with the
-        # Git Bash executable so `cmd.exe /c <command>` invokes bash,
-        # not cmd.exe directly (which cannot run `ls` etc).
+    def test_submit_plain_submits_raw_payload(self) -> None:
+        # The bottom-of-stack `submit.py` — envelope.command is exactly
+        # what the user types, no rendering, no wrapping.
+        with mock.patch.object(sys, "argv", ["submit.py", "ls /tmp"]), \
+             mock.patch("submitter.submit.write_raw_preview") as preview, \
+             mock.patch("submitter.submit.submit_and_wait") as submit:
+            submit_plain.main()
+        preview.assert_called_once_with("submit.py", "ls /tmp")
+        submit.assert_called_once_with("submit.py", "ls /tmp", 300)
+
+    def test_submit_gitbash_main_submits_raw_payload(self) -> None:
+        # v0.3.2: executor runs `<bash> -c <task.command>` directly, so
+        # submit_gitbash.py just submits the user payload — executor's
+        # configured shell (typically bash / git-bash) parses it.
         with mock.patch.object(sys, "argv", ["submit_gitbash.py", "echo hello"]), \
              mock.patch("submitter.submit_gitbash.write_gitbash_relay_preview") as preview, \
              mock.patch("submitter.submit_gitbash.submit_and_wait") as submit:
             submit_gitbash.main()
         preview.assert_called_once_with("submit_gitbash.py", "echo hello")
-        submit.assert_called_once()
-        call_args = submit.call_args
-        self.assertEqual(call_args.args[0], "submit_gitbash.py")
-        submitted_cmd = call_args.args[1]
-        self.assertIn("bash.exe", submitted_cmd)
-        self.assertIn("-c", submitted_cmd)
-        self.assertIn("echo hello", submitted_cmd)
-        self.assertEqual(call_args.args[2], 300)
+        submit.assert_called_once_with("submit_gitbash.py", "echo hello", 300)
 
-    def test_submit_gitbash_ssh_main_submits_wrapped_windows_cmdline(self) -> None:
-        # submit_gitbash_ssh.py on Windows executor: the envelope command
-        # is `"<git bash>" -c <ssh base64-wrapped relay>` so cmd.exe /c
-        # hands the whole thing to bash which parses the ssh trampoline
-        # correctly.
+    def test_submit_gitbash_ssh_main_submits_base64_relay_script(self) -> None:
+        # submit_gitbash_ssh.py renders the ssh base64 trampoline
+        # client-side and submits that as a plain string. The executor
+        # runs bash -c <that string> — no extra Windows cmdline wrap.
         payload = 'python3 -c "print(\\"hello\\nworld\\")"'
         with mock.patch.object(sys, "argv", ["submit_gitbash_ssh.py", "H20", payload]), \
              mock.patch("submitter.submit_gitbash_ssh.write_gitbash_ssh_preview") as preview, \
@@ -65,14 +74,17 @@ class CliEntrypointTests(unittest.TestCase):
         call_args = submit.call_args
         self.assertEqual(call_args.args[0], "submit_gitbash_ssh.py")
         submitted_cmd = call_args.args[1]
-        # Outer: git bash Windows cmdline. Inner: ssh H20 "bash -c …base64…".
-        self.assertIn("bash.exe", submitted_cmd)
-        self.assertIn("ssh H20", submitted_cmd)
+        # Just the ssh base64 trampoline; no outer bash.exe cmdline wrap.
+        self.assertTrue(submitted_cmd.startswith("ssh H20 "))
         self.assertIn("base64 -d", submitted_cmd)
+        self.assertIn('"bash -c', submitted_cmd)
+        self.assertNotIn("bash.exe", submitted_cmd)
         self.assertEqual(call_args.args[2], 300)
         self.assertEqual(call_args.kwargs, {"metadata": {"ssh_host": "H20"}})
 
-    def test_submit_powershell_main_submits_wrapped_powershell_cmdline(self) -> None:
+    def test_submit_powershell_main_submits_encoded_command(self) -> None:
+        # submit_powershell.py builds `powershell.exe -EncodedCommand <b64>`
+        # as a plain string — bash on the executor invokes powershell.
         with mock.patch.object(sys, "argv", ["submit_powershell.py", "Get-Location"]), \
              mock.patch("submitter.submit_powershell.write_relay_preview") as preview, \
              mock.patch("submitter.submit_powershell.submit_and_wait") as submit:
@@ -86,8 +98,6 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(call_args.args[2], 300)
 
     def test_submit_bash_main_submits_raw_payload(self) -> None:
-        # Linux-executor path: envelope command is exactly the user's
-        # payload; /bin/sh -c <payload> runs it on the relay.
         with mock.patch.object(sys, "argv", ["submit_bash.py", "ls -la /tmp"]), \
              mock.patch("submitter.submit_bash.write_bash_relay_preview") as preview, \
              mock.patch("submitter.submit_bash.submit_and_wait") as submit:

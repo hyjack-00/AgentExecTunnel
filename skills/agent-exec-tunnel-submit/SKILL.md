@@ -22,23 +22,31 @@ Note: the terminal "preview" output below is **for humans**. The actual command 
 
 ## Workflow
 
-**Pick the submitter CLI by the executor's OS** (not by your own OS — this is about where the command will run):
+**All submitter CLIs ship a single command string to the executor.** The executor then runs `<configured_shell> -c <command>` (typically bash / Git Bash). The variants differ only in what shape of string they generate:
 
-| Executor OS | Direct relay command | SSH-wrapped command |
+| CLI | What it ships | Use when |
 |---|---|---|
-| **Windows** (Git Bash) | `submit_gitbash.py` | `submit_gitbash_ssh.py` |
-| **Windows** (PowerShell) | `submit_powershell.py` | `submit_powershell_ssh.py` |
-| **Linux** | `submit_bash.py` | `submit_bash.py 'ssh HOST "..."'` (hand-wrap) |
+| `submit.py` | exactly your payload, no wrapping | you want full manual control |
+| `submit_bash.py` / `submit_gitbash.py` | your payload, no wrapping | a bash / git-bash command |
+| `submit_powershell.py` | `powershell.exe -EncodedCommand <b64>` | a PowerShell command |
+| `submit_gitbash_ssh.py` | `ssh HOST "bash -c $(echo '<b64>' | base64 -d)"` | complex quoting through ssh — variants below do NOT chew quotes |
+| `submit_powershell_ssh.py` | powershell → ssh wrapper | ssh from a PowerShell-flavored relay |
+
+The `_ssh` variants are **convenience wrappers**. You can always reproduce their effect with `submit.py` plus manual quoting — they just save you from counting shell layers yourself.
 
 1. Run exactly one of the following forms from the repo root. Keep the payload as one whole outer shell string. Do not let bash split the command body into multiple argv pieces.
 ```bash
-# Relay on Linux executor:
-python3 submitter/submit_bash.py '<relay_command>'
+# Bottom of stack — raw, no rendering:
+python3 submitter/submit.py '<any shell command>'
 
-# Relay on Windows executor:
+# Convenience: direct bash/git-bash command:
+python3 submitter/submit_bash.py '<relay_command>'
 python3 submitter/submit_gitbash.py '<relay_command>'
 
-# SSH-wrapped to target host through Windows executor:
+# Convenience: PowerShell command:
+python3 submitter/submit_powershell.py '<ps_command>'
+
+# Convenience: ssh-wrapped with bullet-proof quoting (uses base64):
 python3 submitter/submit_gitbash_ssh.py TARGET_HOST '<target_command>'
 
 # Shared file upload (single-submitter scenarios only — see known issues):

@@ -73,16 +73,13 @@ Result (executor → `agent-backward-285`):
 # one-time setup (only needed if this host uploads files)
 python3 tools/bootstrap_repos.py
 
-# submitter CLIs — pick by executor OS:
-# Linux executor:
-python3 submitter/submit_bash.py 'ls -la /tmp'
-
-# Windows executor (Git Bash):
-python3 submitter/submit_gitbash.py 'ls /c/Users/'
-python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'
-
-# Windows executor (PowerShell):
-python3 submitter/submit_powershell.py 'echo hello'
+# submitter CLIs — all ship a single command string; executor runs it
+# via `<executor_shell> -c <command>`. See SKILL.md for when to pick which.
+python3 submitter/submit.py 'ls -la /tmp'                # raw, no wrapping
+python3 submitter/submit_bash.py 'ls -la /tmp'           # same as submit.py
+python3 submitter/submit_gitbash.py 'ls /c/Users/'       # same (Git Bash target)
+python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi' # ssh base64 trampoline
+python3 submitter/submit_powershell.py 'echo hello'      # powershell -EncodedCommand
 python3 submitter/submit_powershell_ssh.py H20 'uname -a'
 
 # upload a file / directory into agent_forward/files/<namespace>/
@@ -115,13 +112,18 @@ python3 tools/bootstrap_repos.py                 # clones agent_forward
 
 `.aet-remotes.json` / `AET_FORWARD_REMOTE` / `AET_DATA_BRANCH` override the default forward repo URL for file uploads only.
 
-## Ntfy configuration
+## Configuration
 
-Settings override any of these via `agent_exec_tunnel.config.Settings`:
+Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 
+**Executor shell** (new in v0.3.2 — the executor runs `<executor_shell> -c <task.command>` directly, no cmd.exe / /bin/sh middle layer):
+- `executor_shell` — path to the shell binary. Default: `/bin/bash` on Linux, Git Bash on Windows, fallback to `cmd.exe`. Override with env `AET_EXECUTOR_SHELL=<path>`.
+- `executor_shell_args` — the `-c`-equivalent flag list. Default: `["-c"]`, or `["/c"]` if `executor_shell` is `cmd.exe`. Override with env `AET_EXECUTOR_SHELL_ARGS="-Command"` (whitespace-split).
+
+**Ntfy**:
 - `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
 - `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names
-- `ntfy_poll_since` (default `"2h"`) — server-side replay window used for dedup bootstrap
+- `ntfy_poll_since` (default `"30m"`) — server-side replay window used for dedup bootstrap
 - `ntfy_poll_base_seconds` (default `1.0`) — polling base interval
 - `ntfy_poll_jitter_growth` (default `1.10`) / `ntfy_poll_jitter_floor` (default `0.05`) — upward jitter shape
 - `submit_timeout_grace_seconds` (default `15.0`) — extra wait-budget so the submitter can still see the executor-authored `stale` envelope when a task times out

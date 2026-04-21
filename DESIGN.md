@@ -163,27 +163,34 @@ Executor-only hosts (the common deployment) do **not** need the `agent_forward` 
 
 `tests/availability/` drives the real submitter CLIs on a randomized schedule (burst + quiet-tick Bernoulli) and writes records into JSONL. `tests/availability/report.py` renders an HTML dashboard with hop cards (by `implies_ok` tag), p50/p95/p99 latency, preview + total stage timings, a 24h hourly SVG heartbeat, per-probe table, and recent failures. See `tests/availability/README.md` for operation and `tests/availability/ssh` for the `local_relay`-mode ssh shim.
 
-## Transport flow (v0.3)
+## Transport flow (v0.3.2)
+
+Two orthogonal improvements over v0.3.0:
+
+1. **No more `Popen(str, shell=True)`**. Python's `shell=True` hardcodes `/bin/sh -c` on Linux and `cmd.exe /c` on Windows — an unavoidable extra shell layer. As of v0.3.2 the executor uses `Popen([executor_shell, *executor_shell_args, task["command"]], shell=False)` with `executor_shell` picked from config / env (`/bin/bash` on Linux, Git Bash on Windows by default, override via `AET_EXECUTOR_SHELL`). Net: payload passes through **one** shell parse (the configured shell), not two.
+2. **Envelope stays a single `str`**. Submitter CLIs are just convenience — they render specific payload shapes (ssh base64 trampoline, `powershell.exe -EncodedCommand`, raw pass-through, …) client-side. The executor never branches on CLI flavor, it just runs the string. A new `submitter/submit.py` skips *all* rendering so complex payloads can be hand-crafted when the helpers aren't flexible enough.
+
+### End-to-end for `submit_gitbash_ssh.py H20 '<payload>'`
 
 The quoting history: chaining `user bash → executor sh -c → ssh argv join → remote shell -c → command shell` produces up to 5 shell-parse layers. Every layer chews one `\`. For any non-trivial payload this balloons into `\\\\\\\"`-level escaping that no human can maintain. We solve it by **base64-encoding the user's payload at the submitter**, wrapping it in an inert `bash -c "$(echo '<b64>' | base64 -d)"` trampoline, and letting every intermediate shell see the base64 blob as one atomic literal — the payload bytes **are not parsed by any shell** except the final one that runs them.
 
 ### End-to-end for `submit_gitbash_ssh.py H20 '<payload>'`
 
 ```
-USER                        SUBMITTER (client)                EXECUTOR (sh -c)          SSH client            REMOTE BASH
-──────                      ──────────────────                ────────────────          ──────────            ───────────
-payload bytes          ──▶  base64(payload) = <B64>       ──▶ sh parses:            ──▶ stdin: argv[2..]  ──▶ $SHELL -c "<received>"
-(single-quote outer;        relay =                           ssh LOCAL              ─▶ pure byte join,     parses dquoted $() :
- bash passes through)       ssh HOST                          "bash -c …$()…"        no re-quoting         runs subshell
-                              "bash -c                        (0 payload chars                             echo '<B64>' | base64 -d
-                                 \"\$(echo '<B64>'             consumed — <B64>                            → decoded = <payload>
-                                  | base64 -d)\""              lives in '…')                               bash -c <payload>
-                            envelope:                                                                      ↓
-                              { "kind":"task",                                                             FINAL SHELL PARSE
-                                "command": relay,                                                          (the only layer that
-                                ... }                                                                      reads user bytes)
-                            publish to ntfy forward                                                        ↓
-                                                                                                           exec <user command>
+USER                   SUBMITTER (client)                EXECUTOR                  SSH client            REMOTE BASH
+──────                 ──────────────────                ────────                  ──────────            ───────────
+payload bytes     ──▶  base64(payload) = <B64>       ──▶ Popen([bash.exe,      ──▶ stdin: argv[2..]  ──▶ $SHELL -c "<received>"
+(single-quote          relay =                           "-c", relay],             pure byte join,     parses dquoted $() :
+ outer; bash             ssh HOST                        shell=False)              no re-quoting         runs subshell
+ passes through)         "bash -c                        └── bash parses                                 echo '<B64>' | base64 -d
+                            \"\$(echo '<B64>'               relay: calls ssh                             → decoded = <payload>
+                             | base64 -d)\""                with argv[2] =                               bash -c <payload>
+                       envelope:                            "bash -c $(echo                              ↓
+                         { "kind":"task",                   '<B64>' | base64                             FINAL SHELL PARSE
+                           "command": relay,                -d)"                                         (the only layer that
+                           ... }                                                                         reads user bytes)
+                       publish to ntfy forward                                                           ↓
+                                                                                                         exec <user command>
 ```
 
 **Parse-count table** (layers that read the payload's bytes):
@@ -193,12 +200,12 @@ payload bytes          ──▶  base64(payload) = <B64>       ──▶ sh par
 | User's outer bash | ✓ (but single-quote shields it) | 0 |
 | Submitter encoder (base64) | — (pure byte transform) | 0 |
 | JSON + ntfy over the wire | — (opaque) | 0 |
-| Executor `sh -c <relay>` | payload lives inside `'<B64>'` literal | 0 |
+| Executor `Popen([bash, -c, relay], shell=False)` | payload lives inside `'<B64>'` literal | 0 |
 | SSH client argv join | — (byte concat) | 0 |
 | Remote `$SHELL -c` parsing `bash -c "$(…)"` | `$()` decodes; result not re-parsed | 0 |
 | Remote `bash -c <decoded>` | **this one parses `<payload>` as shell source** | **1** |
 
-Total: **1 shell parse of the payload**, which is exactly what the user expects when they write shell code.
+Total: **1 shell parse of the payload**, which is exactly what the user expects when they write shell code. Compared to v0.3.1 this saves one layer (the executor side Python-hardcoded `sh -c` / `cmd.exe /c` is gone).
 
 ### Preview output is for humans
 

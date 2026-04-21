@@ -1,11 +1,52 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.3.1"
+PACKAGE_VERSION = "v0.3.2"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _default_executor_shell() -> str:
+    """Pick a sensible shell for the current host.
+
+    v0.3.2 moves away from `subprocess.Popen(str, shell=True)` (which
+    hardcodes `/bin/sh -c` on Linux and `cmd.exe /c` on Windows) toward
+    `Popen([shell, -c, cmd], shell=False)`. The chosen shell matters:
+    - on Linux, default to `/bin/bash` (POSIX-plus ergonomics, matches
+      what users write at the terminal).
+    - on Windows, default to Git Bash (msys2) if present; otherwise
+      `cmd.exe` which at least runs plain Windows commands.
+
+    Override at deploy time with the `AET_EXECUTOR_SHELL` env var.
+    """
+    override = os.environ.get("AET_EXECUTOR_SHELL")
+    if override:
+        return override
+    if os.name == "nt":
+        candidates = (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return "cmd.exe"
+    return "/bin/bash"
+
+
+def _default_executor_shell_args() -> list[str]:
+    override = os.environ.get("AET_EXECUTOR_SHELL_ARGS")
+    if override is not None:
+        # Split on whitespace — for most shells this is exactly what you
+        # want (`-c`, `-Command`, `/c`, etc). Use `AET_EXECUTOR_SHELL`
+        # directly if your shell needs multi-word flags with spaces.
+        return override.split()
+    if _default_executor_shell().lower().endswith("cmd.exe"):
+        return ["/c"]
+    return ["-c"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +59,13 @@ class Settings:
     network_retry_max_backoff_seconds: float = 8.0
     git_command_timeout_seconds: int = 20
     log_level: str = "info"
+    # v0.3.2: executor runs `Popen([executor_shell, *executor_shell_args,
+    # task["command"]], shell=False)` — avoids Python's mandatory cmd.exe
+    # / /bin/sh layer. Per-task shell choice is still expressed in
+    # task["command"] by invoking a specific shell there (e.g.
+    # `powershell.exe -EncodedCommand …`); the executor is agnostic.
+    executor_shell: str = field(default_factory=_default_executor_shell)
+    executor_shell_args: list[str] = field(default_factory=_default_executor_shell_args)
     ntfy_server_url: str = "https://ntfy.sh"
     ntfy_forward_topic: str = "agent-forward-285"
     ntfy_backward_topic: str = "agent-backward-285"

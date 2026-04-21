@@ -10,7 +10,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from submitter._submit_common import (
-    render_gitbash_relay_command,
     require_single_payload,
     submit_and_wait,
     write_gitbash_relay_preview,
@@ -37,12 +36,10 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     write_gitbash_relay_preview("submit_gitbash.py", payload)
-    # Submit the git-bash-wrapped Windows cmdline so the executor's
-    # subprocess.Popen(shell=True) → cmd.exe /c <...> will start bash.exe
-    # and pass the user's payload to bash's -c (NOT to cmd.exe, which
-    # cannot parse shell-style commands like `ls`). Windows-executor only.
-    command, _relay_script = render_gitbash_relay_command(payload)
-    submit_and_wait("submit_gitbash.py", command, args.timeout_seconds)
+    # v0.3.2: executor runs `<executor_shell> -c <task.command>` directly
+    # (shell=False), so we submit the raw payload. The executor's
+    # configured shell (typically bash / git-bash) parses it.
+    submit_and_wait("submit_gitbash.py", payload, args.timeout_seconds)
 
 
 if __name__ == "__main__":

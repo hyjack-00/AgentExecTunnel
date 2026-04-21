@@ -275,9 +275,16 @@ class Executor:
         started_at = iso_z(started_at_dt)
         deadline_at = started_at_dt + timedelta(seconds=int(task["timeout_seconds"]))
         try:
+            # v0.3.2 — shell=False with the configured executor shell.
+            # Python's shell=True hardcodes /bin/sh on Linux and cmd.exe
+            # on Windows, adding an extra parse layer the user can't
+            # influence. Explicitly exec'ing [bash, -c, cmd] goes
+            # directly to the shell we want.
+            cfg = self.settings
+            argv = [cfg.executor_shell, *cfg.executor_shell_args, task["command"]]
             process = subprocess.Popen(
-                task["command"],
-                shell=True,
+                argv,
+                shell=False,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

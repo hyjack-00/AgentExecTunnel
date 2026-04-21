@@ -98,7 +98,25 @@
 - [ ] **`submit_files.py` 同步问题**：多 submitter 并发 push 到同一个 forward 仓库 main 分支时存在 git rebase 竞争；当前**暂不可用**于并发场景。单 submitter 场景正常。根因不在 ntfy 转轨，是上古 git 文件平面的老问题。后续考虑：改为 object-store（S3/R2），或每文件一个独立分支/tag。
 - [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
 
-### 10. v0.4 候选：executor 改 shell=False，直接走首选 shell
+### 8.3 v0.3.2：executor 改 shell=False + envelope 保持 string + submit.py ✅
+
+**触发**：user 重新澄清需求：envelope 字符串传输（secondary preference）；relay 要彻底去掉 cmd.exe 这一层；ssh 变体 CLI 仅作便利工具，与手写 `ssh HOST '...'` 用户侧效果等价；EXTRA：submit.py 可通过复杂手写 payload 达成任何变体等效。
+
+**方案**（字符串 envelope + shell=False + 配置 shell，**不是** argv-list）：
+- [x] `agent_exec_tunnel/config.py` 新增 `executor_shell: str`（默认 `/bin/bash`）和 `executor_shell_args: list[str]`（默认 `["-c"]`），env 可覆盖 `AET_EXECUTOR_SHELL` / `AET_EXECUTOR_SHELL_ARGS`
+- [x] `agent_exec_tunnel/executor.py`：`Popen(task["command"], shell=True)` → `Popen([cfg.executor_shell, *cfg.executor_shell_args, task["command"]], shell=False)`
+- [x] `agent_exec_tunnel/protocol.py` 保持 `command: str`（envelope 不动）
+- [x] `submitter/submit_gitbash.py` 回滚 v0.3.1 的客户端 wrap：现在只提交 **raw payload**
+- [x] `submitter/submit_gitbash_ssh.py` 回滚 v0.3.1：提交 `relay_script`（base64 蹦床保留）而不是 Windows cmdline
+- [x] `submitter/submit_powershell.py`、`submit_powershell_ssh.py`：保持 v0.3.1
+- [x] `submitter/submit_bash.py`：保持 v0.3.1
+- [x] **新增** `submitter/submit.py`：最薄 CLI，envelope 就是用户输入字节
+- [x] 测试：回滚 v0.3.1 test_cli_entrypoints.py 的 "wrapped cmdline" 断言为 "raw payload"，新增 submit.py 测试；新增 executor Popen shell=False 的断言
+- [x] **新增** `tools/test_remote_relay.py`：31 个复杂 payload 测试脚本（单双反引号嵌套、`$VAR`、pipe、redirect、heredoc、subshell、UTF-8、多行、literal `\`、glob、长 payload、nested Python JSON），走 submit_gitbash_ssh → fake ssh 或真实远端。支持 `--host`、`--only`、`--stop-on-fail`
+- [x] 文档：DESIGN.md Transport flow 改为新链路 + 更新 parse-count 表；SKILL.md CLI 表改为"按便利程度选"、submit.py 置顶；README 同步 Configuration 章节
+- [x] VERSION / PACKAGE_VERSION → v0.3.2；reviews/v0.3.2.md + evaluations/v0.3.2.md；tag v0.3.2
+
+### 10. v0.4 候选：其余 deferred 一次性做完
 **动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。
 
 **方案**：executor 加 `Settings.executor_shell` 和 `Settings.executor_shell_args`（不只一个字段——bash 用 `["-c"]`，PowerShell 用 `["-NoProfile", "-Command"]`，cmd.exe 用 `["/c"]`），执行改成：
