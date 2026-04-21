@@ -98,6 +98,24 @@
 - [ ] **`submit_files.py` 同步问题**：多 submitter 并发 push 到同一个 forward 仓库 main 分支时存在 git rebase 竞争；当前**暂不可用**于并发场景。单 submitter 场景正常。根因不在 ntfy 转轨，是上古 git 文件平面的老问题。后续考虑：改为 object-store（S3/R2），或每文件一个独立分支/tag。
 - [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。
 
+### 10. v0.4 候选：executor 改 shell=False，直接走首选 shell
+**动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。
+
+**方案**：executor 加 `Settings.executor_shell`（Linux 默认 `/bin/bash`，Windows 覆盖为 `C:\...\bash.exe`），执行改成 `subprocess.Popen([executor_shell, "-c", task["command"]], shell=False)`。
+
+**收益**：
+- envelope.command 回归 raw payload，不再有 CLI 层面的 Windows/Linux 区分
+- CLI 数量从 5 个（`submit_{gitbash,gitbash_ssh,powershell,powershell_ssh,bash}.py`）减到 2 个（`submit.py` + `submit_ssh.py`）
+- preview ≡ wire ≡ 用户意图，三者完全对齐
+- 引号计数少 1 层（cmd.exe/sh 这层没了）
+
+**代价**：
+- 需要再次 migrate CLI；v0.3.1 刚教育用户"按 OS 选"又要改回"按场景选"
+- envelope 丢失"该用哪个 shell"的信号——如果一台 executor 要同时跑 bash 和 powershell 任务，办不到（需两个 executor 或加 per-task `shell` hint）
+- 无法再为每个 submitter CLI 做本地 render 优化（因为 executor 接管了 shell 选择）
+
+**建议**：和 §8.2 deferred 那堆（base64 缺失伪成功保护、ARG_MAX 预检、PowerShell ssh 也 base64 化、host `-` 注入、doc drift、`AET_SHOW_WIRE=1` 调试开关）作为 v0.4 一次性交付。v0.3.1 先沉淀。
+
 ## 备注
 
 - 旧 PROGRESS.md 的内容（v0.0.1 → v0.1.3 的历史已完成项 + notes）已经在 git 历史里，不再复制进此文件。
