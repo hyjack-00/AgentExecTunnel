@@ -75,9 +75,13 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(call_args.args[0], "submit_gitbash_ssh.py")
         submitted_cmd = call_args.args[1]
         # Just the ssh base64 trampoline; no outer bash.exe cmdline wrap.
+        # v0.3.4 adds safety checks (command -v base64, exit 127/97).
         self.assertTrue(submitted_cmd.startswith("ssh H20 "))
         self.assertIn("base64 -d", submitted_cmd)
-        self.assertIn('"bash -c', submitted_cmd)
+        self.assertIn("command -v base64", submitted_cmd)
+        self.assertIn("exec bash -c", submitted_cmd)
+        self.assertIn("exit 127", submitted_cmd)
+        self.assertIn("exit 97", submitted_cmd)
         self.assertNotIn("bash.exe", submitted_cmd)
         self.assertEqual(call_args.args[2], 300)
         self.assertEqual(call_args.kwargs, {"metadata": {"ssh_host": "H20"}})

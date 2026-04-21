@@ -122,49 +122,45 @@
 - [x] 文档：README Configuration + DESIGN.md "No auth" → "partially closed in v0.3.3"
 - [x] VERSION → v0.3.3、reviews + evaluations、tag v0.3.3
 
+### 8.5 v0.3.4：v0.4 deferred 一次性交付 ✅
+**动机**：§9 攒了一批 "不急但该做" 的 hardening：远端 `base64` 缺失的伪成功、host 前缀 `-` 的 ssh option 注入、ARG_MAX 没有 pre-flight 只会等到系统层 E2BIG 才报错、`submit_powershell_ssh.py` 仍在用脆弱的 `--%` stop-parsing、preview 与 wire 的 drift 没有调试开关、`tools/test_remote_relay.py` 的 stripper anchor 不够严格。一次打包做掉。
+
+**完成项**：
+- [x] `submitter/_submit_common.py::_validate_host()` — 拒绝空字符串、拒绝前缀 `-`（反 ssh option 注入）、限字符集 `[A-Za-z0-9._@:-]+`。`render_gitbash_ssh_command` / `render_ssh_command` 入口都调用
+- [x] `_check_arg_max()` + `_ARG_MAX_LIMIT = 100_000`。所有 4 个 render 函数（relay / gitbash_relay / ssh / gitbash_ssh）进入即检查；超限报错指引用户走 `submit_files.py`
+- [x] `_build_remote_trampoline(b64)` 统一蹦床构造：前置 `command -v base64 >/dev/null 2>&1 || { … exit 127; }` 检查；解码后 `[ -n "$_s" ] && exec bash -c "$_s" || { … exit 97; }` 避免空字符串时的伪成功；`exec` 直接 propagate exit code
+- [x] `render_ssh_command`（PowerShell ssh）改为 base64 蹦床：PS 单引号包裹（`''` 转义内部 `'`），弃用 `--%` stop-parsing。`wrapped_target` 仅为 preview 保留
+- [x] `render_gitbash_ssh_command`（Git-Bash ssh）沿用蹦床，升级到带安全检查的版本
+- [x] `AET_SHOW_WIRE=1` 调试开关：所有 4 个 `write_*_preview` 在 env 置位时额外 emit `[wire] <full_command>` 行
+- [x] `tools/test_remote_relay.py` 的 stripper 改为 `SUBMITTED command_id=` 行 anchor，不再用前缀匹配（payload 里若出现 `  -> ` 也不会误剥）
+- [x] 测试补齐：
+  - `_validate_host` 的 accept/reject 案例（leading dash / metachar / user@host / port 语法）
+  - `_ARG_MAX_LIMIT` 溢出拒绝（4 个 render 都覆盖）
+  - PS ssh 的 base64 trampoline 解码断言
+  - gitbash ssh 升级后的安全检查断言（exit 127 / 97 / `command -v base64`）
+  - `AET_SHOW_WIRE` 行为断言（env 置位产生 `[wire] `、不置位不产生）
+- [x] 全测 73 → 73 passing（+6 from v0.3.3 的 67）。本地用 `tests/availability/ssh` shim 手验 gitbash ssh 渲染的 trampoline 可执行，回显正确
+- [x] 文档：README Configuration 加 `AET_SHOW_WIRE`；DESIGN.md Trade-offs 段更新 "v0.3.4 closes …"
+- [x] VERSION / PACKAGE_VERSION → v0.3.4；reviews + evaluations；tag v0.3.4
+
 ### 9. 已知问题 & 已解决项备忘
 
-**未解决（留给 v0.4+）**：
+**未解决（留给未来）**：
 
-- [ ] **`submit_files.py` 并发 push 同步问题**：多 submitter 并发向同一 `agent_forward` main 分支 push 会撞 rebase/push 循环；单 submitter 场景正常。根因是 git 文件平面的老问题，与 ntfy 转轨无关。后续可选：改 object-store（S3/R2）或每文件一个独立分支/tag。
+- [ ] **跨 executor shell 语法挂钩**：一台 executor 只能跑一种 shell（v0.3.2 起 `executor_shell` 配置化、默认 `/bin/bash`）。要同时跑 bash 与 powershell 任务需要两个 executor（不同 ntfy topic），或在 envelope 加 per-task `shell` hint（会打破 v0.3 的 unified transport）。目前无压力解决。
 
-- [ ] **v0.4 candidates**（打包一次性做）— 远端 `base64` 缺失的 silent success 保护、`$(…)` 吃尾换行的文档 / 替代蹦床、ARG_MAX pre-flight、`submit_powershell_ssh.py` 也 base64 化、host 前缀 `-` 的 ssh option 注入、`AET_SHOW_WIRE=1` 调试开关。`tools/test_remote_relay.py` 的 preview-stripper 用 `SUBMITTED command_id=…` 行作为 anchor（当前用前缀匹配，payload 内容如果撞上 `  -> ` 会误剥）。
-
-**已解决（此前记在 §9 但其实已做完）**：
+**已解决（此前记在 §9 但其实已做完或已在 v0.3.4 关闭）**：
 
 - [x] ~~"submit_gitbash.py 外层要不要 base64"~~ — v0.3.2 之后无意义：submit_gitbash.py 提交 raw payload，executor `bash -c <payload>` 只做 1 层 shell 解析，用户单引号外裹就够；再加 base64 会和 submit_gitbash_ssh.py 重复。**无需动作**。
 - [x] ~~"executor 也要识别附件化的大附件消息，读取逻辑需在 exe & sub 之间通用化"~~ — 早已集中在 `agent_exec_tunnel/ntfy_transport.py::_record_to_envelope` + `_attachment_maybe_json` + `_load_json_url`。`poll_since()` 是 submitter（`wait_for`）和 executor（`poll_loop` / `seed_seen_ids`）**共用**的入口，attachment 自动解析。**已通用化**。
-
-### 10. v0.4 候选：其余 deferred 一次性做完
-**动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。
-
-**方案**：executor 加 `Settings.executor_shell` 和 `Settings.executor_shell_args`（不只一个字段——bash 用 `["-c"]`，PowerShell 用 `["-NoProfile", "-Command"]`，cmd.exe 用 `["/c"]`），执行改成：
-```python
-subprocess.Popen(
-    [cfg.executor_shell, *cfg.executor_shell_args, task["command"]],
-    shell=False,
-)
-```
-
-**收益**（经 re-audit 后的诚实清单）：
-- executor 本地 shell 层数从 2（Python 的 cmd.exe/sh + 目标 bash）降到 1
-- envelope.command 回归 raw payload，CLI 可以压到 2 个（`submit.py` + `submit_ssh.py`）
-- preview ≡ wire ≡ 用户意图，三者完全对齐
-- Windows cmd.exe 的 argv 拼接怪癖（`\"`、CreateProcess-to-argv 规则）整层消失
-- 不过 **ssh 路径的总 shell 层数不变**（远端 sshd 的 `$SHELL -c` + 最终 `bash -c decoded` 两层是 ssh 协议决定的、客户端免不掉），**base64 蹦床仍必需**
-
-**代价**：
-- 需要再次 migrate CLI；v0.3.1 刚教育用户"按 OS 选"又要改回"按场景选"
-- envelope 丢失"该用哪个 shell"的信号：**一台 executor 只能一种 shell**。要同时跑 bash 和 powershell 任务需两个 executor（不同 ntfy topic），或加 per-task `shell` hint（打破 unification）
-- 跨 shell 语法 payload 必挂：bash executor 不认 `dir`/`Get-Location`；powershell executor 不认 `ls`。控制权从 "per-task 指定" 换成 "per-executor 配置"——**不是问题消失、是位置转移**
-- ARG_MAX 上限不变（argv 总字节数限制一样生效）
-- 远端无 `base64` 命令时仍会伪成功，**shell=False 救不了远端**
-
-**建议**：和 §8.2 deferred 那堆（base64 缺失伪成功保护、ARG_MAX 预检、PowerShell ssh 也 base64 化、host `-` 注入、doc drift、`AET_SHOW_WIRE=1` 调试开关）作为 v0.4 一次性交付。v0.3.1 先沉淀。
-
-**v0.3.1 仍然有价值的部分**（shell=False 迁移后留下）：
-- submitter 侧的 `render_gitbash_ssh_command` 的 **base64 蹦床**在 ssh 路径仍必需（解 quoting）
-- preview vs wire 的清晰分野：shell=False 让两者更对齐，但 base64 蹦床下仍然"preview 是人意图、wire 是 base64"，SKILL.md 的那句 caveat 保留
+- [x] ~~"远端 `base64` 缺失的 silent success"~~ — v0.3.4 在蹦床前置 `command -v base64` 检查，缺失时 exit 127 并打印 stderr。
+- [x] ~~"`$(…)` 吃尾换行"~~ — 对 shell 命令 payload 无感知（尾 newline 不改变 `bash -c` 语义）；v0.3.4 的 `[ -n "$_s" ]` 检查额外防护了空 decode 的伪成功。
+- [x] ~~"ARG_MAX pre-flight"~~ — v0.3.4 统一入口处 100 KB 上限检查，超限给出明确指引走 `submit_files.py`。
+- [x] ~~"`submit_powershell_ssh.py` 也 base64 化"~~ — v0.3.4 `render_ssh_command` 用 PS 单引号包裹 base64 蹦床，弃用 `--%`。
+- [x] ~~"host 前缀 `-` 的 ssh option 注入"~~ — v0.3.4 `_validate_host` 拒绝。
+- [x] ~~"`AET_SHOW_WIRE=1` 调试开关"~~ — v0.3.4 所有 preview writer 支持。
+- [x] ~~"`tools/test_remote_relay.py` 的 preview-stripper anchor 不严"~~ — v0.3.4 改为 `SUBMITTED command_id=` 行 anchor。
+- [x] ~~"`submit_files.py` 并发 push 同步问题"~~ — submitter 侧有限次 rebase 重试、允许失败，用户明确表示可接受；不是阻塞项。
 
 ## 备注
 

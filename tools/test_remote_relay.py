@@ -258,20 +258,19 @@ def _run_case(case: Case, host: str, env: dict, timeout: float) -> tuple[bool, s
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
 
-    # The submitter prints a 3-line preview and a `SUBMITTED` line
-    # before the remote stdout. Trim everything before the first line
-    # we know is NOT preview/SUBMITTED.
+    # The submitter prints preview lines and a `SUBMITTED command_id=…` line
+    # before the remote stdout. Anchor the split on the `SUBMITTED ` line so
+    # a payload whose own output happens to begin with `-> ` or `  -> ` is
+    # not misclassified as preview. Drop the `[wire] ` line if AET_SHOW_WIRE
+    # was set.
     remote_out_lines: list[str] = []
-    in_output = False
+    seen_submitted = False
     for line in stdout.splitlines(True):
         stripped = line.rstrip("\r\n")
-        if not in_output:
-            if (stripped.startswith("-> ")
-                or stripped.startswith("  -> ")
-                or stripped.startswith("    -> ")
-                or stripped.startswith("SUBMITTED ")):
-                continue
-            in_output = True
+        if not seen_submitted:
+            if stripped.startswith("SUBMITTED command_id="):
+                seen_submitted = True
+            continue
         remote_out_lines.append(line)
     remote_out = "".join(remote_out_lines)
 

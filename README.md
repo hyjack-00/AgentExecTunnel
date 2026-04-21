@@ -125,6 +125,12 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 - `AET_NTFY_TOKEN` env var — same effect, takes precedence over the hardcoded default. Useful when you prefer not to commit the token.
 - One source of truth: both submitter and executor go through `ntfy_transport`, so switching modes is a single-line edit.
 
+**Submitter hardening** (new in v0.3.4):
+- `AET_SHOW_WIRE=1` — every `submit_*` CLI emits an extra `[wire] <full_command>` line alongside the three human-readable preview lines, so you can see exactly what goes on the wire without inspecting ntfy. Off by default.
+- ssh host validation rejects leading `-` (ssh option-injection guard) and restricts the charset to `[A-Za-z0-9._@:-]+`. Rejected hosts raise `ValueError` before any ntfy publish.
+- ARG_MAX pre-flight: every submitter renderer refuses payloads > 100 KB with a message pointing to `submitter/submit_files.py` for out-of-band upload.
+- Remote base64 trampoline (used by `submit_gitbash_ssh.py` and `submit_powershell_ssh.py`) now checks `command -v base64` (exits 127 when missing), verifies the decoded payload is non-empty (exits 97 on empty/garbled decode), and `exec`s the decoded command so the remote exit code propagates cleanly.
+
 **Ntfy**:
 - `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
 - `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names
