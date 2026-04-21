@@ -101,20 +101,33 @@
 ### 10. v0.4 候选：executor 改 shell=False，直接走首选 shell
 **动机**：Python `subprocess.Popen(s, shell=True)` 在 Linux 硬编码走 `/bin/sh -c`，在 Windows 硬编码走 `cmd.exe /c`，多一层永远绕不开。v0.3.1 的 `submit_gitbash.py` 因此必须在 submitter 端先渲染 `"...bash.exe" -c <payload>` 再交给 cmd.exe。
 
-**方案**：executor 加 `Settings.executor_shell`（Linux 默认 `/bin/bash`，Windows 覆盖为 `C:\...\bash.exe`），执行改成 `subprocess.Popen([executor_shell, "-c", task["command"]], shell=False)`。
+**方案**：executor 加 `Settings.executor_shell` 和 `Settings.executor_shell_args`（不只一个字段——bash 用 `["-c"]`，PowerShell 用 `["-NoProfile", "-Command"]`，cmd.exe 用 `["/c"]`），执行改成：
+```python
+subprocess.Popen(
+    [cfg.executor_shell, *cfg.executor_shell_args, task["command"]],
+    shell=False,
+)
+```
 
-**收益**：
-- envelope.command 回归 raw payload，不再有 CLI 层面的 Windows/Linux 区分
-- CLI 数量从 5 个（`submit_{gitbash,gitbash_ssh,powershell,powershell_ssh,bash}.py`）减到 2 个（`submit.py` + `submit_ssh.py`）
+**收益**（经 re-audit 后的诚实清单）：
+- executor 本地 shell 层数从 2（Python 的 cmd.exe/sh + 目标 bash）降到 1
+- envelope.command 回归 raw payload，CLI 可以压到 2 个（`submit.py` + `submit_ssh.py`）
 - preview ≡ wire ≡ 用户意图，三者完全对齐
-- 引号计数少 1 层（cmd.exe/sh 这层没了）
+- Windows cmd.exe 的 argv 拼接怪癖（`\"`、CreateProcess-to-argv 规则）整层消失
+- 不过 **ssh 路径的总 shell 层数不变**（远端 sshd 的 `$SHELL -c` + 最终 `bash -c decoded` 两层是 ssh 协议决定的、客户端免不掉），**base64 蹦床仍必需**
 
 **代价**：
 - 需要再次 migrate CLI；v0.3.1 刚教育用户"按 OS 选"又要改回"按场景选"
-- envelope 丢失"该用哪个 shell"的信号——如果一台 executor 要同时跑 bash 和 powershell 任务，办不到（需两个 executor 或加 per-task `shell` hint）
-- 无法再为每个 submitter CLI 做本地 render 优化（因为 executor 接管了 shell 选择）
+- envelope 丢失"该用哪个 shell"的信号：**一台 executor 只能一种 shell**。要同时跑 bash 和 powershell 任务需两个 executor（不同 ntfy topic），或加 per-task `shell` hint（打破 unification）
+- 跨 shell 语法 payload 必挂：bash executor 不认 `dir`/`Get-Location`；powershell executor 不认 `ls`。控制权从 "per-task 指定" 换成 "per-executor 配置"——**不是问题消失、是位置转移**
+- ARG_MAX 上限不变（argv 总字节数限制一样生效）
+- 远端无 `base64` 命令时仍会伪成功，**shell=False 救不了远端**
 
 **建议**：和 §8.2 deferred 那堆（base64 缺失伪成功保护、ARG_MAX 预检、PowerShell ssh 也 base64 化、host `-` 注入、doc drift、`AET_SHOW_WIRE=1` 调试开关）作为 v0.4 一次性交付。v0.3.1 先沉淀。
+
+**v0.3.1 仍然有价值的部分**（shell=False 迁移后留下）：
+- submitter 侧的 `render_gitbash_ssh_command` 的 **base64 蹦床**在 ssh 路径仍必需（解 quoting）
+- preview vs wire 的清晰分野：shell=False 让两者更对齐，但 base64 蹦床下仍然"preview 是人意图、wire 是 base64"，SKILL.md 的那句 caveat 保留
 
 ## 备注
 
