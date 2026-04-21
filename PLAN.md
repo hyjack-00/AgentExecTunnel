@@ -76,6 +76,24 @@
 - [x] 全部测试通过
 - [x] VERSION + PACKAGE_VERSION → v0.3；reviews/v0.3.md + evaluations/v0.3.md；tag v0.3
 
+### 8.1 v0.3 post-tag review
+- [x] subagent 审查（代码 + docs 对齐）
+- [x] bash codex 审查（命令行工具/外部视角）
+- [x] 反馈整合 → 确认走 v0.3.1
+
+### 8.2 v0.3.1：preview≠wire 修复 + CLI 拆 Windows/Linux
+**触发**：user 报告 `submit_gitbash.py 'ls'` 在 Windows executor 失败（`cmd.exe /c ls` 不认 `ls`）。根因：v0.3 的 `submit_gitbash.py` 仍然提交 raw payload 而非 git-bash wrapped 的 Windows cmdline，preview 与实际 wire 脱节。
+
+- [ ] `submit_gitbash.py` 提交 `render_gitbash_relay_command(payload)` 的第一个返回值（`"C:\...bash.exe" -c <payload>` Windows cmdline） — **Windows executor 专用**
+- [ ] `submit_gitbash_ssh.py` 同步改为提交 `command`（`list2cmdline([git_bash, "-c", relay_script])`） — **Windows executor 专用**
+- [ ] `submit_powershell.py` 提交 `render_relay_command(payload)` 的第一个返回值（`powershell.exe -EncodedCommand <b64-utf16>`） — **Windows executor 专用**
+- [ ] `submit_powershell_ssh.py` 保持现状（已经在 v0.3 改为提交 `powershell_cmd`） — **Windows executor 专用**
+- [ ] 新增 `submitter/submit_bash.py`：单纯提交 raw payload，**Linux executor 专用**（`/bin/sh -c <payload>`）
+- [ ] `test_cli_entrypoints.py` 更新 submit_gitbash + submit_gitbash_ssh 的断言；补充 submit_bash.py 测试；增加 submit_powershell 的 CLI 测试
+- [ ] SKILL.md：说明 Windows vs Linux executor 的 CLI 选择；删掉 powershell 路径提及的冗余（如有）
+- [ ] README / DESIGN：更新 CLI 列表与执行端平台说明
+- [ ] VERSION / PACKAGE_VERSION → v0.3.1；`reviews/v0.3.1.md` + `evaluations/v0.3.1.md`；tag v0.3.1
+
 ### 9. 已知问题（留给 v0.3+ ）
 - [ ] **`submit_files.py` 同步问题**：多 submitter 并发 push 到同一个 forward 仓库 main 分支时存在 git rebase 竞争；当前**暂不可用**于并发场景。单 submitter 场景正常。根因不在 ntfy 转轨，是上古 git 文件平面的老问题。后续考虑：改为 object-store（S3/R2），或每文件一个独立分支/tag。
 - [ ] submit_gitbash.py 外层不做 base64 wrap 的权衡回顾（是否也该 base64 化以彻底免引号） — 现在的妥协是：用户单引号外裹 + executor 单层 sh 解析，**足以覆盖大部分场景**。下个周期评估需求。

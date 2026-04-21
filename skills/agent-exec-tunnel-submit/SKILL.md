@@ -22,15 +22,26 @@ Note: the terminal "preview" output below is **for humans**. The actual command 
 
 ## Workflow
 
+**Pick the submitter CLI by the executor's OS** (not by your own OS — this is about where the command will run):
+
+| Executor OS | Direct relay command | SSH-wrapped command |
+|---|---|---|
+| **Windows** (Git Bash) | `submit_gitbash.py` | `submit_gitbash_ssh.py` |
+| **Windows** (PowerShell) | `submit_powershell.py` | `submit_powershell_ssh.py` |
+| **Linux** | `submit_bash.py` | `submit_bash.py 'ssh HOST "..."'` (hand-wrap) |
+
 1. Run exactly one of the following forms from the repo root. Keep the payload as one whole outer shell string. Do not let bash split the command body into multiple argv pieces.
 ```bash
-# Relay-host direct command:
+# Relay on Linux executor:
+python3 submitter/submit_bash.py '<relay_command>'
+
+# Relay on Windows executor:
 python3 submitter/submit_gitbash.py '<relay_command>'
 
-# Relay-host ssh-wrapped command:
+# SSH-wrapped to target host through Windows executor:
 python3 submitter/submit_gitbash_ssh.py TARGET_HOST '<target_command>'
 
-# Shared file upload:
+# Shared file upload (single-submitter scenarios only — see known issues):
 python3 submitter/submit_files.py --name <namespace> --src <local_file_or_dir>
 ```
 
@@ -91,7 +102,14 @@ There is no protocol-level streaming output in this skill.
 
 ## Examples
 
-Git bash for relay-host command:
+Linux executor, relay command:
+
+```bash
+python3 submitter/submit_bash.py 'ls -la /tmp'
+python3 submitter/submit_bash.py 'uname -a && hostname'
+```
+
+Windows executor, relay command:
 
 ```bash
 python3 submitter/submit_gitbash.py 'ls /c/Users/'

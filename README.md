@@ -73,13 +73,21 @@ Result (executor → `agent-backward-285`):
 # one-time setup (only needed if this host uploads files)
 python3 tools/bootstrap_repos.py
 
-# submitter CLIs (publish a task, wait for result)
-python3 submitter/submit_powershell.py 'echo hello'
-python3 submitter/submit_powershell_ssh.py H20 'uname -a'
+# submitter CLIs — pick by executor OS:
+# Linux executor:
+python3 submitter/submit_bash.py 'ls -la /tmp'
+
+# Windows executor (Git Bash):
 python3 submitter/submit_gitbash.py 'ls /c/Users/'
 python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi'
 
+# Windows executor (PowerShell):
+python3 submitter/submit_powershell.py 'echo hello'
+python3 submitter/submit_powershell_ssh.py H20 'uname -a'
+
 # upload a file / directory into agent_forward/files/<namespace>/
+# (single-submitter only — concurrent pushes have a known sync issue;
+#  see PLAN.md §9)
 python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir
 
 # executor loop (long-running; survives transient ntfy outages)

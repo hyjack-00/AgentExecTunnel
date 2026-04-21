@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agent_exec_tunnel.config import default_settings
-from submitter import submit_files, submit_gitbash, submit_gitbash_ssh
+from submitter import submit_bash, submit_files, submit_gitbash, submit_gitbash_ssh, submit_powershell
 
 ROOT = Path(__file__).resolve().parents[1]
 _bootstrap_spec = importlib.util.spec_from_file_location(
@@ -32,17 +32,29 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(settings.ntfy_backward_topic, "agent-backward-285")
         self.assertEqual(settings.default_timeout_seconds, 300)
 
-    def test_submit_gitbash_main_invokes_preview_and_submit(self) -> None:
+    def test_submit_gitbash_main_submits_wrapped_windows_cmdline(self) -> None:
+        # Windows-executor path: the envelope command must start with the
+        # Git Bash executable so `cmd.exe /c <command>` invokes bash,
+        # not cmd.exe directly (which cannot run `ls` etc).
         with mock.patch.object(sys, "argv", ["submit_gitbash.py", "echo hello"]), \
              mock.patch("submitter.submit_gitbash.write_gitbash_relay_preview") as preview, \
              mock.patch("submitter.submit_gitbash.submit_and_wait") as submit:
             submit_gitbash.main()
         preview.assert_called_once_with("submit_gitbash.py", "echo hello")
-        submit.assert_called_once_with("submit_gitbash.py", "echo hello", 300)
+        submit.assert_called_once()
+        call_args = submit.call_args
+        self.assertEqual(call_args.args[0], "submit_gitbash.py")
+        submitted_cmd = call_args.args[1]
+        self.assertIn("bash.exe", submitted_cmd)
+        self.assertIn("-c", submitted_cmd)
+        self.assertIn("echo hello", submitted_cmd)
+        self.assertEqual(call_args.args[2], 300)
 
-    def test_submit_gitbash_ssh_main_submits_rendered_ssh_command(self) -> None:
-        # submit_gitbash_ssh.py renders the ssh wrap client-side and submits
-        # one plain command string — no submit_mode / target_host in envelope.
+    def test_submit_gitbash_ssh_main_submits_wrapped_windows_cmdline(self) -> None:
+        # submit_gitbash_ssh.py on Windows executor: the envelope command
+        # is `"<git bash>" -c <ssh base64-wrapped relay>` so cmd.exe /c
+        # hands the whole thing to bash which parses the ssh trampoline
+        # correctly.
         payload = 'python3 -c "print(\\"hello\\nworld\\")"'
         with mock.patch.object(sys, "argv", ["submit_gitbash_ssh.py", "H20", payload]), \
              mock.patch("submitter.submit_gitbash_ssh.write_gitbash_ssh_preview") as preview, \
@@ -53,13 +65,35 @@ class CliEntrypointTests(unittest.TestCase):
         call_args = submit.call_args
         self.assertEqual(call_args.args[0], "submit_gitbash_ssh.py")
         submitted_cmd = call_args.args[1]
-        # Client-side base64 wrap: command starts with `ssh H20 "bash -c …"`
-        # and contains an `echo '...' | base64 -d` decoding trampoline.
-        self.assertTrue(submitted_cmd.startswith("ssh H20 "))
+        # Outer: git bash Windows cmdline. Inner: ssh H20 "bash -c …base64…".
+        self.assertIn("bash.exe", submitted_cmd)
+        self.assertIn("ssh H20", submitted_cmd)
         self.assertIn("base64 -d", submitted_cmd)
-        self.assertIn('"bash -c', submitted_cmd)
         self.assertEqual(call_args.args[2], 300)
         self.assertEqual(call_args.kwargs, {"metadata": {"ssh_host": "H20"}})
+
+    def test_submit_powershell_main_submits_wrapped_powershell_cmdline(self) -> None:
+        with mock.patch.object(sys, "argv", ["submit_powershell.py", "Get-Location"]), \
+             mock.patch("submitter.submit_powershell.write_relay_preview") as preview, \
+             mock.patch("submitter.submit_powershell.submit_and_wait") as submit:
+            submit_powershell.main()
+        preview.assert_called_once_with("submit_powershell.py", "Get-Location")
+        submit.assert_called_once()
+        call_args = submit.call_args
+        submitted_cmd = call_args.args[1]
+        self.assertIn("powershell.exe", submitted_cmd)
+        self.assertIn("-EncodedCommand", submitted_cmd)
+        self.assertEqual(call_args.args[2], 300)
+
+    def test_submit_bash_main_submits_raw_payload(self) -> None:
+        # Linux-executor path: envelope command is exactly the user's
+        # payload; /bin/sh -c <payload> runs it on the relay.
+        with mock.patch.object(sys, "argv", ["submit_bash.py", "ls -la /tmp"]), \
+             mock.patch("submitter.submit_bash.write_bash_relay_preview") as preview, \
+             mock.patch("submitter.submit_bash.submit_and_wait") as submit:
+            submit_bash.main()
+        preview.assert_called_once_with("submit_bash.py", "ls -la /tmp")
+        submit.assert_called_once_with("submit_bash.py", "ls -la /tmp", 300)
 
     def test_submit_files_main_uploads_into_forward_files_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

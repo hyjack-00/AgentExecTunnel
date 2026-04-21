@@ -37,13 +37,15 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
     write_gitbash_ssh_preview("submit_gitbash_ssh.py", args.host, payload)
-    # Client-side ssh wrap: render the base64-protected relay command here so
-    # the envelope carries ONE plain command string. The executor has no
-    # ssh-specific code path — it just runs whatever command it receives.
-    _win, relay_script, _wrapped = render_gitbash_ssh_command(args.host, payload)
+    # Client-side ssh wrap + Windows-cmdline wrap: render the git-bash
+    # cmdline that `cmd.exe /c <...>` will invoke. cmd.exe then starts
+    # bash.exe which parses the ssh base64 trampoline correctly. This is
+    # a Windows-executor-only path; for Linux executors, use submit_bash.py
+    # and hand-write the ssh yourself (or wait for a future submit_bash_ssh.py).
+    command, _relay_script, _wrapped = render_gitbash_ssh_command(args.host, payload)
     submit_and_wait(
         "submit_gitbash_ssh.py",
-        relay_script,
+        command,
         args.timeout_seconds,
         metadata={"ssh_host": args.host},
     )
