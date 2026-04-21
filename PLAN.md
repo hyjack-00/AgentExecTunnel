@@ -143,6 +143,23 @@
 - [x] 文档：README Configuration 加 `AET_SHOW_WIRE`；DESIGN.md Trade-offs 段更新 "v0.3.4 closes …"
 - [x] VERSION / PACKAGE_VERSION → v0.3.4；reviews + evaluations；tag v0.3.4
 
+### 8.6 v0.4：submit_files.py 同步传输 + 远端拉取验证 ✅
+**动机**：v0.3.x 的 `submit_files.py` 只 push 到 GitHub，不阻塞也不验证执行端是否拉取、是否真的有这个文件。user 明确要求：上传必须阻塞到验证有效；本地重试、远端拉取重试都要 15s×3；失败要明确区分 "push 失败"、"pull 失败"、"pull 成功但文件不在"；namespace 一次性。
+
+**方案**：不改 executor，`submit_files.py` 本地渲染远端 bash 命令，走普通 ntfy 任务路径 publish + wait。执行端仍是 mode-agnostic 的 `bash -c <command>`。
+
+- [x] `submit_files.py` 改写：
+  - 本地 `git_sync` best-effort + namespace 唯一性检查（`files/<name>/` 已存在则拒绝）
+  - `copy_tree_or_file` 落到 `files/<name>/<src.name>`
+  - `git_commit_push` 外套 3×15s 重试（内层 `max_attempts=8`），失败 exit 1，提示重跑
+  - `_render_remote_verify_command` 生成单串 bash 命令：`FORWARD_ROOT="${AET_FORWARD_ROOT:-agent_forward}"` → `cd` → `git fetch+reset --hard` 三次、每次失败后 `sleep 15` → `[ -e files/<name>/<filename> ]` → stdout `VERIFY_OK …` / stderr `VERIFY_MISSING …`，exit codes 10/11/12 区分 forward_root 缺失 / pull 一直失败 / pull 成功但文件不在
+  - `publish_task(timeout_seconds=120)` + `wait_for_result` 阻塞，解析结果：exit 0→`VERIFIED`、exit 12/stderr `VERIFY_MISSING`→exit 3 提示重试、其他→exit 2 打印手动运行的 bash 命令
+- [x] 新增 4 个 cli 测试：happy path / 重用 namespace 被拒 / remote pull 失败 with manual hint / local push 失败 with re-run hint
+- [x] 端到端手工验证（fake origin git repo）：VERIFY_OK / VERIFY_MISSING / forward_root 缺失三路全部得到正确 exit code
+- [x] 73 → 77 passing
+- [x] 文档：DESIGN.md 「File plane」章节重写；README "File plane (GitHub + ntfy verification)" + CLI 块同步；PLAN §8.6；reviews + evaluations
+- [x] VERSION → v0.4、PACKAGE_VERSION → v0.4、tag v0.4
+
 ### 9. 已知问题 & 已解决项备忘
 
 **未解决（留给未来）**：

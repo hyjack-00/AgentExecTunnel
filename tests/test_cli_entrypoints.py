@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -109,7 +110,8 @@ class CliEntrypointTests(unittest.TestCase):
         preview.assert_called_once_with("submit_bash.py", "ls -la /tmp")
         submit.assert_called_once_with("submit_bash.py", "ls -la /tmp", 300)
 
-    def test_submit_files_main_uploads_into_forward_files_prefix(self) -> None:
+    def test_submit_files_main_uploads_and_verifies_remotely(self) -> None:
+        # Happy path: local sync + push OK, remote verify returns exit 0.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / "payload.txt"
@@ -117,18 +119,139 @@ class CliEntrypointTests(unittest.TestCase):
             forward = root / "forward"
             forward.mkdir()
             settings = SimpleNamespace(forward_root=forward)
+            verify_result = SimpleNamespace(
+                task_id="verify-1",
+                payload={"status": "done", "exit_code": 0, "stdout_tail": "VERIFY_OK namespace=demo\n", "stderr_tail": ""},
+            )
             with mock.patch.object(sys, "argv", ["submit_files.py", "--name", "demo", "--src", str(src)]), \
                  mock.patch("submitter.submit_files.default_settings", return_value=settings), \
                  mock.patch("submitter.submit_files.git_sync") as git_sync, \
                  mock.patch("submitter.submit_files.git_commit_push") as git_commit_push, \
-                 mock.patch("submitter.submit_files.copy_tree_or_file") as copy_tree_or_file:
+                 mock.patch("submitter.submit_files.copy_tree_or_file") as copy_tree_or_file, \
+                 mock.patch("submitter.submit_files.publish_task", return_value="verify-1") as publish, \
+                 mock.patch("submitter.submit_files.wait_for_result", return_value=verify_result) as waiter:
                 submit_files.main()
         git_sync.assert_called_once_with(forward)
         copy_tree_or_file.assert_called_once()
         copied_src, copied_dst = copy_tree_or_file.call_args[0]
         self.assertEqual(copied_src, src.resolve())
         self.assertEqual(copied_dst, forward / "files" / "demo" / "payload.txt")
-        git_commit_push.assert_called_once_with(forward, "upload files for demo")
+        git_commit_push.assert_called_once_with(forward, "upload files for demo", max_attempts=8)
+        # verify command includes the namespace and filename as quoted path,
+        # plus the 3-attempt pull fallback chain and VERIFY_OK / VERIFY_MISSING tags.
+        publish.assert_called_once()
+        verify_cmd = publish.call_args.kwargs["command"]
+        self.assertIn("files/demo/payload.txt", verify_cmd)
+        self.assertIn("VERIFY_OK namespace=demo", verify_cmd)
+        self.assertIn("VERIFY_MISSING namespace=demo", verify_cmd)
+        self.assertIn("git fetch --quiet origin main", verify_cmd)
+        self.assertEqual(verify_cmd.count("git fetch --quiet origin main"), 3)
+        self.assertIn("AET_FORWARD_ROOT", verify_cmd)
+        waiter.assert_called_once()
+
+    def test_submit_files_rejects_reused_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "payload.txt"
+            src.write_text("demo", encoding="utf-8")
+            forward = root / "forward"
+            forward.mkdir()
+            (forward / "files" / "demo").mkdir(parents=True)  # namespace already exists
+            settings = SimpleNamespace(forward_root=forward)
+            with mock.patch.object(sys, "argv", ["submit_files.py", "--name", "demo", "--src", str(src)]), \
+                 mock.patch("submitter.submit_files.default_settings", return_value=settings), \
+                 mock.patch("submitter.submit_files.git_sync"), \
+                 mock.patch("submitter.submit_files.git_commit_push"), \
+                 mock.patch("submitter.submit_files.copy_tree_or_file"), \
+                 mock.patch("submitter.submit_files.publish_task") as publish:
+                with self.assertRaises(SystemExit) as cm:
+                    submit_files.main()
+        self.assertIn("already in use", str(cm.exception))
+        publish.assert_not_called()
+
+    def test_submit_files_reports_remote_pull_failed_with_manual_hint(self) -> None:
+        # Upload OK; remote task returned non-zero WITHOUT VERIFY_MISSING.
+        # Expect exit 2 and the manual-retry hint printed to stderr.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "payload.txt"
+            src.write_text("demo", encoding="utf-8")
+            forward = root / "forward"
+            forward.mkdir()
+            settings = SimpleNamespace(forward_root=forward)
+            verify_result = SimpleNamespace(
+                task_id="verify-2",
+                payload={"status": "done", "exit_code": 11, "stdout_tail": "", "stderr_tail": "git pull failed after 3 attempts\n"},
+            )
+            stderr_stream = StringIO()
+            with mock.patch.object(sys, "argv", ["submit_files.py", "--name", "nm2", "--src", str(src)]), \
+                 mock.patch("submitter.submit_files.default_settings", return_value=settings), \
+                 mock.patch("submitter.submit_files.git_sync"), \
+                 mock.patch("submitter.submit_files.git_commit_push"), \
+                 mock.patch("submitter.submit_files.copy_tree_or_file"), \
+                 mock.patch("submitter.submit_files.publish_task", return_value="verify-2"), \
+                 mock.patch("submitter.submit_files.wait_for_result", return_value=verify_result), \
+                 mock.patch("sys.stderr", stderr_stream):
+                with self.assertRaises(SystemExit) as cm:
+                    submit_files.main()
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("remote pull did NOT succeed", stderr_stream.getvalue())
+        self.assertIn("to finish verification manually", stderr_stream.getvalue())
+
+    def test_submit_files_reports_file_missing_after_pull(self) -> None:
+        # Upload OK; remote pulled cleanly but file not in tree (exit 12).
+        # Expect exit 3.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "payload.txt"
+            src.write_text("demo", encoding="utf-8")
+            forward = root / "forward"
+            forward.mkdir()
+            settings = SimpleNamespace(forward_root=forward)
+            verify_result = SimpleNamespace(
+                task_id="verify-3",
+                payload={"status": "done", "exit_code": 12, "stdout_tail": "", "stderr_tail": "VERIFY_MISSING namespace=nm3 path='files/nm3/payload.txt'\n"},
+            )
+            stderr_stream = StringIO()
+            with mock.patch.object(sys, "argv", ["submit_files.py", "--name", "nm3", "--src", str(src)]), \
+                 mock.patch("submitter.submit_files.default_settings", return_value=settings), \
+                 mock.patch("submitter.submit_files.git_sync"), \
+                 mock.patch("submitter.submit_files.git_commit_push"), \
+                 mock.patch("submitter.submit_files.copy_tree_or_file"), \
+                 mock.patch("submitter.submit_files.publish_task", return_value="verify-3"), \
+                 mock.patch("submitter.submit_files.wait_for_result", return_value=verify_result), \
+                 mock.patch("sys.stderr", stderr_stream):
+                with self.assertRaises(SystemExit) as cm:
+                    submit_files.main()
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("absent from the pulled tree", stderr_stream.getvalue())
+
+    def test_submit_files_reports_local_upload_failure_with_rerun_hint(self) -> None:
+        # git_commit_push raises CalledProcessError on all attempts; expect
+        # exit 1 and a "please re-run" hint. Patch time.sleep to keep the test
+        # fast.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "payload.txt"
+            src.write_text("demo", encoding="utf-8")
+            forward = root / "forward"
+            forward.mkdir()
+            settings = SimpleNamespace(forward_root=forward)
+            stderr_stream = StringIO()
+            err = subprocess.CalledProcessError(1, ["git", "push"], stderr="remote rejected\n")
+            with mock.patch.object(sys, "argv", ["submit_files.py", "--name", "nm4", "--src", str(src)]), \
+                 mock.patch("submitter.submit_files.default_settings", return_value=settings), \
+                 mock.patch("submitter.submit_files.git_sync"), \
+                 mock.patch("submitter.submit_files.git_commit_push", side_effect=err), \
+                 mock.patch("submitter.submit_files.copy_tree_or_file"), \
+                 mock.patch("submitter.submit_files.publish_task") as publish, \
+                 mock.patch("submitter.submit_files.time.sleep"), \
+                 mock.patch("sys.stderr", stderr_stream):
+                with self.assertRaises(SystemExit) as cm:
+                    submit_files.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("please re-run", stderr_stream.getvalue())
+        publish.assert_not_called()
 
     def test_bootstrap_ensure_repo_clones_from_remote_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

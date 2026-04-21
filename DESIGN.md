@@ -104,7 +104,7 @@ Result envelope (published to the backward topic):
 - `agent_exec_tunnel/protocol.py` — `TaskRecord` / `ResultRecord` dataclasses with `to_envelope()`; `new_task_id()` (64-bit jitter).
 - `agent_exec_tunnel/config.py` — `Settings` dataclass including all `ntfy_*` knobs plus `submit_timeout_grace_seconds` (see below).
 - `submitter/_submit_common.py` — shell wrappers + `submit_and_wait(label, command, mode, timeout)` used by the four `submit_{gitbash,powershell}[_ssh].py` CLIs.
-- `submitter/submit_files.py` — file upload: `git_sync → copy → git_commit_push` on `agent_forward`. Only code path that still touches git.
+- `submitter/submit_files.py` — synchronous verified file upload: `git_sync → namespace-unique check → copy → git_commit_push (3×15s retry) → ntfy-dispatch remote pull+verify task → block on result`. Renders the remote command client-side so the executor stays mode-agnostic.
 - `tools/bootstrap_repos.py` — clone / sync `agent_forward` for hosts that push files.
 
 ### Executor concurrency model
@@ -145,11 +145,34 @@ The executor's idle cadence is `base_seconds + random.uniform(0, jitter_max)`.
 - The submitter's wait deadline is `timeout_seconds + submit_timeout_grace_seconds` (default +15s). The grace absorbs publish → dispatch → worker-spawn skew so the submitter can still observe an executor-authored `stale` envelope when a task times out, instead of racing past it.
 - Final-state failure paths on the submitter: `TimeoutError` with one of two messages — "ntfy reachable; executor may be down or overloaded" or "last ntfy poll failed — server may be unreachable". These distinguish "we saw fresh polls succeed but no result" from "we couldn't even reach ntfy".
 
-## File plane (git)
+## File plane (git + ntfy verification)
 
-`submitter/submit_files.py` copies a local path into `agent_forward/files/<namespace>/…` and runs `git fetch / rebase / push` on the forward repo. This is the only remaining git write path. Consequence: concurrent `submit_files.py` calls still serialize through the `main` branch's rebase-push loop, but the previous source of contention (task/ACK/result JSON writes) is gone, so the realistic conflict rate drops to the rate of file uploads — small.
+`submitter/submit_files.py` is a **synchronous, verified** file transfer: it blocks until the executor has pulled the file AND confirmed the file is present in its local tree. It is a composition of the two existing planes — GitHub for bytes, ntfy for the pull-and-check round-trip — not a new transport.
 
-Executor-only hosts (the common deployment) do **not** need the `agent_forward` clone. `executor/run_executor.py` emits a preflight warning when `agent_forward/.git` is missing but does not exit — the message plane is already up.
+**Flow** (v0.4):
+
+1. **Local pre-sync** (best-effort `git fetch + reset --hard origin/main` on the submitter's forward repo) so the subsequent namespace-uniqueness check reflects the true remote state. Failure here is a warning, not fatal.
+2. **Namespace uniqueness**: reject if `agent_forward/files/<name>/` already exists locally. Namespaces are one-shot — a given `--name` may be used only once per forward repo.
+3. **Stage**: `copy_tree_or_file(src, agent_forward/files/<name>/<src.name>)`.
+4. **Push with bounded retry**: up to 3 attempts with 15 s between retries. Each attempt runs `git_commit_push` (which has its own small-cap rebase loop for concurrent-push collisions). Total wall budget ≤ ~45 s + network time. Final failure exits 1 with a `please re-run` hint.
+5. **Render remote verify command**: `submitter/submit_files.py::_render_remote_verify_command(name, filename)` produces a single-string bash command that:
+   - resolves `$AET_FORWARD_ROOT` (fallback: `agent_forward` relative to the executor's cwd)
+   - retries `git fetch + reset --hard origin/main` up to 3 times with 15 s between attempts
+   - runs `[ -e files/<name>/<filename> ]` and prints `VERIFY_OK …` (exit 0) or `VERIFY_MISSING …` (exit 12)
+   - distinct exit codes: 10 forward_root missing, 11 pull kept failing, 12 file absent after a successful pull
+
+   The command is rendered **entirely client-side**. The executor is still mode-agnostic — it just runs `bash -c <command>` via the usual ntfy task path. There is no special-case handling of file uploads in `Executor`.
+6. **Ntfy dispatch + block**: `publish_task(command=verify_cmd, timeout_seconds=120)` then `wait_for_result`. The 120 s budget covers `3 × 15 s` retry sleeps plus actual pull time.
+7. **Interpret result**:
+   - exit 0 → `VERIFIED namespace=<name>`, process exits 0.
+   - exit 12 or stderr contains `VERIFY_MISSING` → upload + pull OK but file absent; exit 3 with a retry hint.
+   - anything else (exit 10/11, stale envelope, ntfy timeout) → exit 2 and print the exact manual bash command so the operator can retry on the executor host.
+
+**Rendering choice**. The remote command lives in `submit_files.py` — not in `executor.py` — so the same executor binary runs regular tasks and verify tasks through one code path. Changing the verify semantics is a submitter-side edit; no executor redeploy.
+
+**Concurrency note**. Concurrent `submit_files.py` calls still serialize at the git `main` branch's push level. The internal rebase loop (`git_commit_push(max_attempts=8)`) is bounded; the outer `3 × 15 s` retry loop absorbs transient collisions. This is acceptable for the single-submitter workflow that the message plane already assumes.
+
+Executor-only hosts (the common deployment) do **not** need the `agent_forward` clone. `executor/run_executor.py` emits a preflight warning when `agent_forward/.git` is missing but does not exit — the message plane is already up. Hosts that want to receive file uploads must have `agent_forward` bootstrapped and (optionally) `AET_FORWARD_ROOT` exported if the executor's cwd is not the repo root.
 
 ## Known MVP trade-offs (deferred)
 

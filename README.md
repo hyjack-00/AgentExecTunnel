@@ -17,13 +17,20 @@ Dedup is task_id-keyed and in-memory on both sides. Executor seeds its `seen_ids
 
 The message plane has **no ACK layer** and **no authentication** — if the executor crashes mid-task and restarts within 2h, the task may re-run once; anyone who guesses the topic can inject a task envelope. MVP assumes a trusted environment. Add HMAC signing or a private ntfy instance for production use.
 
-## File plane (GitHub)
+## File plane (GitHub + ntfy verification)
 
-File uploads — binaries, source trees — are still transferred via a plain git repo:
+File uploads — binaries, source trees — travel over a plain git repo:
 
 - `agent_forward/files/<namespace>/...`
 
-Provisioned once per host by `tools/bootstrap_repos.py`. The executor does not need this repo at all unless the task commands reference uploaded files.
+**v0.4**: `submit_files.py` is now a **synchronous, verified** transfer. It stages the file locally, pushes to GitHub (with 3×15 s retry), then dispatches a `bash -c <rendered>` task over ntfy that makes the executor `git fetch + reset --hard origin/main` (with 3×15 s retry) and run `[ -e <path> ]`. The submitter blocks until either:
+
+- the executor reports the file is present (exit 0), or
+- the upload / pull / presence check fails in a specific way the submitter can distinguish (exit 1 / 2 / 3 — see the command block above).
+
+The verify command is rendered entirely client-side in `submitter/submit_files.py` — the executor has no special case for file uploads, it just runs the shell command it receives. Namespaces (`--name`) are one-shot per forward repo: reusing a name locally is rejected up front.
+
+Provisioned once per host by `tools/bootstrap_repos.py`. Hosts that won't receive file uploads do not need this repo; the executor does not need it unless task commands reference uploaded files. Hosts that **will** receive uploads may export `AET_FORWARD_ROOT` to locate their `agent_forward` clone; otherwise the default is `agent_forward` relative to the executor's working directory.
 
 ## Envelope shapes
 
@@ -82,10 +89,15 @@ python3 submitter/submit_gitbash_ssh.py H20 'nvidia-smi' # ssh base64 trampoline
 python3 submitter/submit_powershell.py 'echo hello'      # powershell -EncodedCommand
 python3 submitter/submit_powershell_ssh.py H20 'uname -a'
 
-# upload a file / directory into agent_forward/files/<namespace>/
-# (single-submitter only — concurrent pushes have a known sync issue;
-#  see PLAN.md §9)
+# upload a file / directory into agent_forward/files/<namespace>/ — SYNC + VERIFIED
+# v0.4: blocks until the executor has pulled AND confirmed presence on disk.
+# One-shot namespaces (a given --name may only be used once per forward repo).
 python3 submitter/submit_files.py --name demo --src /path/to/file-or-dir
+#   exit 0: local upload + remote pull + file check all OK
+#   exit 1: local upload to GitHub failed (3×15s retry exhausted) — please re-run
+#   exit 2: local upload OK, remote pull failed / task timed out —
+#           submitter prints a bash command you can run on the executor host manually
+#   exit 3: local upload OK, remote pull OK, but file is absent — retry
 
 # executor loop (long-running; survives transient ntfy outages)
 python3 executor/run_executor.py
