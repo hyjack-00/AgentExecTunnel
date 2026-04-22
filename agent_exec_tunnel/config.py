@@ -67,8 +67,8 @@ class Settings:
     executor_shell: str = field(default_factory=_default_executor_shell)
     executor_shell_args: list[str] = field(default_factory=_default_executor_shell_args)
     ntfy_server_url: str = "https://ntfy.sh"
-    ntfy_forward_topic: str = "agent-forward-285"
-    ntfy_backward_topic: str = "agent-backward-285"
+    ntfy_forward_topic: str = "FWJKhsad"
+    ntfy_backward_topic: str = "BWaskljd"
     # Shorter polling window — bounds the per-poll payload size and sidesteps
     # the 2h-boundary ambiguity ("is this task really orphaned or are we just
     # past the window?"). Any well-formed task envelope this old is already
