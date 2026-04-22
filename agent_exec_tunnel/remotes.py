@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import TUNNEL_ROOT
 
-DEFAULT_FORWARD_REMOTE = "https://github.com/hyjack-00/agent_forward.git"
+DEFAULT_FORWARD_REMOTE = "https://gitee.com/hyjack-00/agent_forward.git"
 DEFAULT_BRANCH = "main"
 
 ENV_FORWARD_REMOTE = "AET_FORWARD_REMOTE"

@@ -191,7 +191,7 @@ class Executor:
                 for task_id in seed:
                     self.seen_ids[task_id] = now
             self.log(f"ntfy seed: {len(seed)} already-ack'd-or-finished task_ids loaded from backward topic")
-        cap_seconds = self.settings.default_timeout_seconds / 2.0
+        cap_seconds = self.settings.ntfy_poll_cap_seconds
         self.log(
             f"ntfy poll loop starting topic={self.ntfy.forward_topic} "
             f"base={self.ntfy.poll_base_seconds:g}s cap={cap_seconds:g}s"

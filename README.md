@@ -11,7 +11,7 @@ Two world-readable topics on `https://ntfy.sh`:
 - `agent-forward-285` — submitter → executor, task envelopes
 - `agent-backward-285` — executor → submitter, result envelopes
 
-Executor polls `/{topic}/json?poll=1&since=2h` with base 1s cadence and upward jitter capped at `timeout/2` (default 300s / 2 = 150s). Jitter grows on both idle and error; any new envelope resets it. Submitter uses the same primitive (`wait_for(task_id)`) on the backward topic.
+Executor polls `/{topic}/json?poll=1&since=10m` with base 5s cadence and upward jitter capped at `ntfy_poll_cap_seconds` (default 300s — v0.4.2 decoupled from the task-timeout budget). Idle saturation puts each poll into a wide `[5, 300]s` window to blur the periodic-beacon signature that corporate gateways use to auto-isolate new domains. Jitter grows on both idle and error; any new envelope resets it. Submitter uses the same primitive (`wait_for(task_id)`) on the backward topic with its own cap = `result_timeout_seconds / 2`.
 
 Dedup is task_id-keyed and in-memory on both sides. Executor seeds its `seen_ids` on startup from a one-time poll of the backward topic so a restart within the 2h replay window does not re-run already-finished tasks.
 
@@ -150,9 +150,10 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 **Ntfy**:
 - `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
 - `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names
-- `ntfy_poll_since` (default `"30m"`) — server-side replay window used for dedup bootstrap
-- `ntfy_poll_base_seconds` (default `1.0`) — polling base interval
-- `ntfy_poll_jitter_growth` (default `1.10`) / `ntfy_poll_jitter_floor` (default `0.05`) — upward jitter shape
+- `ntfy_poll_since` (default `"10m"`) — server-side replay window used for dedup bootstrap
+- `ntfy_poll_base_seconds` (default `5.0`) — polling base interval
+- `ntfy_poll_jitter_growth` (default `1.5`) / `ntfy_poll_jitter_floor` (default `1.0`) — upward jitter shape
+- `ntfy_poll_cap_seconds` (default `300.0`, v0.4.2) — hard ceiling on per-poll interval; replaces the earlier `default_timeout_seconds / 2` derivation so idle cadence is decoupled from task semantics
 - `submit_timeout_grace_seconds` (default `15.0`) — extra wait-budget so the submitter can still see the executor-authored `stale` envelope when a task times out
 
 ## Resilience

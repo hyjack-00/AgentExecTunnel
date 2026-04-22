@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.4.1"
+PACKAGE_VERSION = "v0.4.2"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -79,9 +79,10 @@ class Settings:
     # long-running executor does not grow memory without bound. Kept at 2×
     # the poll window so even a near-edge replay still dedups correctly.
     seen_ids_ttl_seconds: float = 3600.0
-    ntfy_poll_base_seconds: float = 3.0
+    ntfy_poll_base_seconds: float = 5.0
     ntfy_poll_jitter_growth: float = 1.5
-    ntfy_poll_jitter_floor: float = 0.05
+    ntfy_poll_jitter_floor: float = 1.0
+    ntfy_poll_cap_seconds: float = 300.0
     # Grace on top of task timeout for the submitter to absorb the
     # publish → dispatch → worker-spawn skew so it can still observe an
     # executor-authored `stale` envelope instead of timing out first.

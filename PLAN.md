@@ -179,6 +179,7 @@
 - [ ] **跨 executor shell 语法挂钩**：一台 executor 只能跑一种 shell（v0.3.2 起 `executor_shell` 配置化、默认 `/bin/bash`）。要同时跑 bash 与 powershell 任务需要两个 executor（不同 ntfy topic），或在 envelope 加 per-task `shell` hint（会打破 v0.3 的 unified transport）。目前无压力解决。
 - [ ] **入向 GET 聚合响应可能超过 VPN 审计上限**：executor 的 `poll_since` 响应在 `poll_since="10m"` 窗口内高频任务场景下可累积到接近 audit cap。目前靠窗口缩短缓解，未做 `since=<message-id>` 增量拉取。v0.4.2 候选。
 - [ ] **`TailBuffer.limit=4000` 是字符不是字节**：v0.4.1 的 wire budget 在出口兜底覆盖了这个坑，但根本上应把 TailBuffer 改为按字节限。v0.4.2 候选（伴随上面那条一起做）。
+- [ ] **企业代理"新域自动隔离 + TTL 自动恢复"下的 ntfy 生存性（观察中）**：华为内网 + netentsec 网关对持续轮询的新域自动隔离 ~几小时、到期自动放行。v0.4.2 调宽 poll 区间到 `[base, 300]s` 观察是否降频率足以绕开触发。若仍被隔离，按优先级上：IT 报备 `ntfy.sh` 白名单 → 切 Gitee 做消息面备份 → Cloudflare Workers + KV 自建 pub/sub → 自建 ntfy 挂自有域。SSE 长连接反而会加速触发，不做。
 
 **已解决（此前记在 §9 但其实已做完或已在 v0.3.4 关闭）**：
 
