@@ -143,6 +143,10 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 - ARG_MAX pre-flight: every submitter renderer refuses payloads > 100 KB with a message pointing to `submitter/submit_files.py` for out-of-band upload.
 - Remote base64 trampoline (used by `submit_gitbash_ssh.py` and `submit_powershell_ssh.py`) now checks `command -v base64` (exits 127 when missing), verifies the decoded payload is non-empty (exits 97 on empty/garbled decode), and `exec`s the decoded command so the remote exit code propagates cleanly.
 
+**Executor wire budget + bounded publish retry** (new in v0.4.1):
+- `Settings.ntfy_result_wire_budget_bytes` (default **60000**, env `AET_NTFY_RESULT_WIRE_BUDGET_BYTES`) — cap on the JSON-encoded backward envelope size. Relay hosts that run the executor behind a VPN audit typically reject HTTP packets > 80–100 KB silently; setting this budget at 60 KB leaves ~20–40 KB of HTTP/TLS framing margin. Result envelopes whose tails would overflow are truncated to the *tail of the tail* with a `[truncated by executor: original NB, envelope wire budget NB]` marker prefix. Set lower (e.g. `40000`) for more conservative relays.
+- `publish_forever` (used by the executor's backward-topic publish) is no longer truly infinite: it now takes a `deadline_monotonic` the executor derives from the task's own `timeout_seconds` (full allotment, no deduction for subprocess wall time). A wedged publish gives up when the budget runs out, logs `publish_forever gave up … reason=deadline`, and the submitter's wait surfaces "ntfy reachable; executor may be down or overloaded".
+
 **Ntfy**:
 - `ntfy_server_url` (default `https://ntfy.sh`) — point at a private ntfy instance for auth / throughput
 - `ntfy_forward_topic` / `ntfy_backward_topic` — change topic names

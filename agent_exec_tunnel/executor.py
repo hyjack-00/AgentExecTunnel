@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -13,6 +14,56 @@ from .config import Settings, default_settings
 from .ntfy_transport import NtfyConfig, poll_loop, publish_forever, seed_seen_ids
 from .protocol import AckRecord, ResultRecord, command_digest, iso_z, parse_iso_z, utc_now
 from .storage import tail_text
+
+
+_TRUNCATION_NOTE = "[truncated by executor: original {n}B, envelope wire budget {budget}B]\n"
+
+
+def _envelope_size(envelope: dict) -> int:
+    return len(json.dumps(envelope, sort_keys=True).encode("utf-8"))
+
+
+def _truncate_result_envelope(envelope: dict, budget_bytes: int) -> dict:
+    """Return a copy of `envelope` whose JSON-encoded size fits under
+    `budget_bytes`, truncating stdout_tail / stderr_tail if needed.
+
+    Motivation: relay-host VPN audits (v0.4.1 context) silently drop HTTP
+    packets larger than ~80–100 KB. If a result envelope (especially one
+    with a pathological UTF-8 tail — NULs JSON-escape to `\\u0000`, CJK
+    double-inflates) would exceed our configured budget, chop the tails
+    so the envelope fits. We keep the *tail of the tail* since the last
+    bytes of a subprocess output (error summary, exit banner) are more
+    useful than the first bytes.
+
+    Metadata (task_id, status, times, exit_code, command_digest, …) is
+    left untouched — it's small and load-bearing.
+    """
+    if _envelope_size(envelope) <= budget_bytes:
+        return envelope
+
+    e = dict(envelope)
+    orig_out = e.get("stdout_tail") or ""
+    orig_err = e.get("stderr_tail") or ""
+    out_note = _TRUNCATION_NOTE.format(n=len(orig_out.encode("utf-8")), budget=budget_bytes)
+    err_note = _TRUNCATION_NOTE.format(n=len(orig_err.encode("utf-8")), budget=budget_bytes)
+    # First: strip both tails down to the notes only, so we know the
+    # envelope base size (all other fields + notes).
+    e["stdout_tail"] = out_note
+    e["stderr_tail"] = err_note
+    base = _envelope_size(e)
+    # 256 B slack absorbs surprises from JSON escaping when we put back
+    # raw bytes (control characters, backslashes, quotes).
+    remaining = max(0, budget_bytes - base - 256)
+    per_tail = remaining // 2
+    if per_tail > 0:
+        e["stdout_tail"] = out_note + orig_out[-per_tail:]
+        e["stderr_tail"] = err_note + orig_err[-per_tail:]
+    # Defensive: if JSON escapes still pushed us over, fall back to
+    # notes-only (guaranteed to fit since `base` did).
+    if _envelope_size(e) > budget_bytes:
+        e["stdout_tail"] = out_note
+        e["stderr_tail"] = err_note
+    return e
 
 
 @dataclass
@@ -212,21 +263,37 @@ class Executor:
             process_ref=None,
         )
 
-    def _publish_result(self, result: ResultRecord) -> bool:
-        """Publish a result envelope to the backward topic, retrying
-        indefinitely until success (or until the executor is stopped).
+    def _publish_result(self, result: ResultRecord, task_timeout_seconds: float) -> bool:
+        """Publish a result envelope to the backward topic, retrying until
+        (a) success, (b) executor stop, or (c) `task_timeout_seconds`
+        elapses — whichever comes first.
 
-        Called from the worker thread, so an ntfy outage blocks just this
-        one worker, not the polling main thread. Each retry attempt builds
-        a fresh urllib Request with `Connection: close`, so no stateful
-        connection pool / TLS session can rot across a long outage.
+        Called from the worker thread. Two v0.4.1 behaviors:
+
+        1. The envelope is truncated to `settings.ntfy_result_wire_budget_bytes`
+           *before* publish, so a VPN-audited relay host does not silently
+           drop oversized bodies. Truncation preserves the *tail of the
+           tail* (most diagnostic bytes) plus a `[truncated …]` marker.
+
+        2. Retries are bounded by the task's own `timeout_seconds` budget,
+           full allotment (no deduction for subprocess wall time — the
+           point is that publish is a distinct failure mode from
+           execution, and both get their fair share). Once exhausted we
+           log `gave up … reason=deadline` and the submitter's own wait
+           loop surfaces "ntfy reachable; executor may be down".
         """
+        envelope = _truncate_result_envelope(
+            result.to_envelope(),
+            self.settings.ntfy_result_wire_budget_bytes,
+        )
+        deadline = time.monotonic() + float(task_timeout_seconds)
         return publish_forever(
             self.ntfy,
             self.ntfy.backward_topic,
-            result.to_envelope(),
+            envelope,
             log=self.log,
             stop=self._stop_flag.is_set,
+            deadline_monotonic=deadline,
         )
 
     def _start_worker(self, task: dict) -> None:
@@ -243,31 +310,38 @@ class Executor:
         )
         thread.start()
 
-    def _publish_ack(self, task_id: str) -> bool:
-        """Publish the claim-ACK envelope to the backward topic. Blocks
-        the worker thread until ntfy accepts, so a later executor crash or
-        restart observing this ACK will skip the task (no re-run). Only
-        returns False if the executor is being stopped."""
+    def _publish_ack(self, task_id: str, task_timeout_seconds: float) -> bool:
+        """Publish the claim-ACK envelope to the backward topic, bounded
+        by the task's own timeout budget. On deadline / stop we return
+        False and the worker exits without running the subprocess.
+
+        ACK envelopes are tiny (no tails) so no truncation needed — the
+        deadline is the only v0.4.1 behavior change here.
+        """
         ack = AckRecord(
             task_id=task_id,
             executor_id=self.executor_id,
             ack_at=iso_z(utc_now()),
         )
+        deadline = time.monotonic() + float(task_timeout_seconds)
         return publish_forever(
             self.ntfy,
             self.ntfy.backward_topic,
             ack.to_envelope(),
             log=self.log,
             stop=self._stop_flag.is_set,
+            deadline_monotonic=deadline,
         )
 
     def _run_task_worker(self, task: dict) -> None:
         task_id = task["task_id"]
-        # Publish ACK *before* touching any side effects. A stopped executor
-        # (stop flag set during a publish retry loop) returns False here and
-        # we exit cleanly without having run the command.
-        if not self._publish_ack(task_id):
-            self.log(f"ack publish aborted task_id={task_id} (executor stopping)")
+        task_timeout = float(task["timeout_seconds"])
+        # Publish ACK *before* touching any side effects. Returns False on
+        # stop OR on retry-budget exhaustion (deadline = task's own timeout
+        # budget). Either way we exit cleanly without running the command —
+        # in the deadline case the submitter will have already timed out.
+        if not self._publish_ack(task_id, task_timeout):
+            self.log(f"ack publish aborted task_id={task_id} (executor stopping or deadline)")
             with self._state_lock:
                 self.running_tasks.discard(task_id)
             return
@@ -425,7 +499,14 @@ class Executor:
             process_ref=process_ref,
             stale_at=stale_at,
         )
-        published = self._publish_result(result)
+        # Retry budget = task's own timeout. Missing / malformed timeout
+        # (e.g. the `_publish_envelope_failure` path with a rejected
+        # envelope) falls back to the configured default so we still get
+        # a bounded retry rather than `publish_forever()`.
+        task_timeout = task.get("timeout_seconds")
+        if not isinstance(task_timeout, (int, float)) or task_timeout <= 0:
+            task_timeout = self.settings.default_timeout_seconds
+        published = self._publish_result(result, float(task_timeout))
         task_id = task["task_id"]
         # `publish_forever` only returns False if the executor is being stopped;
         # in every other case (including long ntfy outages) we don't get here

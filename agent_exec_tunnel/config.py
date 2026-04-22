@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-PACKAGE_VERSION = "v0.4"
+PACKAGE_VERSION = "v0.4.1"
 TUNNEL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -74,7 +74,7 @@ class Settings:
     # past the window?"). Any well-formed task envelope this old is already
     # past its timeout (see _is_expired check) so pulling further back buys us
     # nothing actionable.
-    ntfy_poll_since: str = "30m"
+    ntfy_poll_since: str = "10m"
     # In-memory seen_ids TTL. Entries older than this are pruned lazily so a
     # long-running executor does not grow memory without bound. Kept at 2×
     # the poll window so even a near-edge replay still dedups correctly.
@@ -86,6 +86,17 @@ class Settings:
     # publish → dispatch → worker-spawn skew so it can still observe an
     # executor-authored `stale` envelope instead of timing out first.
     submit_timeout_grace_seconds: float = 15.0
+    # v0.4.1: cap on the executor's backward-publish body size. Relay
+    # hosts behind VPN audit enforce a per-HTTP-packet upper bound
+    # (typically 80–100KB) — anything larger is silently dropped and
+    # indistinguishable from normal flakiness. Result envelopes whose
+    # JSON-encoded bytes exceed this budget are truncated (stdout/stderr
+    # tails shrunk with a `[truncated by executor: ...]` note) before
+    # publish. Default 60KB leaves ~20–40KB of HTTP/TLS framing margin
+    # under typical audit caps. Override via env `AET_NTFY_RESULT_WIRE_BUDGET_BYTES`.
+    ntfy_result_wire_budget_bytes: int = field(
+        default_factory=lambda: int(os.environ.get("AET_NTFY_RESULT_WIRE_BUDGET_BYTES", "60000"))
+    )
 
 
 def default_settings() -> Settings:

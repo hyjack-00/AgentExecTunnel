@@ -208,20 +208,28 @@ def publish_forever(
     max_backoff_seconds: float = 30.0,
     log: Callable[[str], None] = lambda m: None,
     stop: Callable[[], bool] = lambda: False,
+    deadline_monotonic: float | None = None,
 ) -> bool:
-    """Retry publish indefinitely until success. Each attempt uses a fresh
-    connection (see `_publish_once`). Backoff is exponential up to
-    `max_backoff_seconds`, honoring server-sent `Retry-After` on 429/503.
-    Returns True on success, False if `stop()` became True while retrying.
+    """Retry publish until success, `stop()`, or `deadline_monotonic` passes.
 
-    Used by the executor's worker thread on the backward-topic result
-    publish: we trust the network to eventually recover, and we'd rather
-    block the worker than drop a result.
+    Each attempt uses a fresh connection (see `_publish_once`). Backoff is
+    exponential up to `max_backoff_seconds`, honoring server-sent
+    `Retry-After` on 429/503. Returns True on success, False if `stop()`
+    became True or the deadline was reached while retrying.
+
+    `deadline_monotonic`: if not None, give up when `time.monotonic()` >=
+    this value. The executor passes `now + task.timeout_seconds` so a
+    wedged backward publish cannot outlive the task's own timeout budget.
+    With `deadline_monotonic=None` retries are truly infinite (backward-
+    compatible).
     """
     body = json.dumps(envelope, sort_keys=True).encode("utf-8")
     backoff = 0.5
     attempt = 0
     while not stop():
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            log(f"ntfy publish_forever gave up topic={topic} attempts={attempt} reason=deadline")
+            return False
         attempt += 1
         try:
             _publish_once(cfg, topic, body)
@@ -230,6 +238,15 @@ def publish_forever(
             return True
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             wait = _retry_after_seconds(exc, backoff)
+            # If sleeping would cross the deadline, shorten the sleep or
+            # bail immediately. This keeps the upper bound tight even when
+            # Retry-After pushes us past the budget.
+            if deadline_monotonic is not None:
+                remaining = deadline_monotonic - time.monotonic()
+                if remaining <= 0:
+                    log(f"ntfy publish_forever gave up topic={topic} attempts={attempt} reason=deadline error={exc}")
+                    return False
+                wait = min(wait, remaining)
             log(f"ntfy publish_forever attempt={attempt} topic={topic} error={exc} retry_in={wait:.1f}s")
             # Grow backoff up to the cap; a server-provided Retry-After
             # overrides our own value for this iteration only.

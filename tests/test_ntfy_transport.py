@@ -15,6 +15,7 @@ from agent_exec_tunnel.ntfy_transport import (
     _record_to_envelope,
     poll_since,
     poll_loop,
+    publish_forever,
     wait_for,
 )
 
@@ -199,6 +200,112 @@ class PollLoopRetryLoggingTests(unittest.TestCase):
             poll_loop(cfg, "topic", lambda env: None, lambda task_id: False, cap_seconds=0.1, stop=stop)
 
         sleep_mock.assert_called_once_with(7.0)
+
+
+class PublishForeverDeadlineTests(unittest.TestCase):
+    """v0.4.1: `publish_forever` accepts an optional `deadline_monotonic`
+    so a wedged backward publish cannot outlive the task's own timeout
+    budget. Absent a deadline the behavior is the classic infinite retry
+    loop (backward-compatible)."""
+
+    def _cfg(self) -> NtfyConfig:
+        return NtfyConfig(
+            server_url="https://ntfy.example",
+            forward_topic="fwd",
+            backward_topic="bwd",
+            poll_since="10m",
+            poll_base_seconds=1.0,
+            poll_jitter_growth=1.1,
+            poll_jitter_floor=0.05,
+        )
+
+    def test_publish_forever_gives_up_at_deadline(self) -> None:
+        # urlopen always raises; deadline is already in the past so we
+        # must return False on the very first iteration without calling
+        # urlopen at all.
+        past = time.monotonic() - 1.0
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("boom"),
+        ) as urlopen_mock, \
+             mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep") as sleep_mock:
+            ok = publish_forever(
+                self._cfg(), "bwd", {"task_id": "t1"},
+                deadline_monotonic=past,
+            )
+        self.assertFalse(ok)
+        urlopen_mock.assert_not_called()
+        sleep_mock.assert_not_called()
+
+    def test_publish_forever_deadline_bounds_total_wait(self) -> None:
+        # Each attempt raises URLError; deadline is 0.05 s from now. The
+        # accumulated sleeps must not push past the deadline.
+        cfg = self._cfg()
+        start = [None]
+
+        def fake_sleep(s: float) -> None:
+            # Advance the clock by `s` (virtual time) so the deadline check
+            # eventually fires. We don't actually sleep in tests.
+            pass
+
+        deadline = time.monotonic() + 0.05
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("boom"),
+        ), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep", side_effect=fake_sleep):
+            t0 = time.monotonic()
+            ok = publish_forever(cfg, "bwd", {"task_id": "t2"}, deadline_monotonic=deadline)
+            wall = time.monotonic() - t0
+        self.assertFalse(ok)
+        # Wall should not blow up; we're capped by the deadline check.
+        self.assertLess(wall, 2.0)
+
+    def test_publish_forever_without_deadline_still_converges_on_recovery(self) -> None:
+        # Two URLError then success. Without deadline this is the
+        # pre-v0.4.1 infinite-retry behavior; just verify it still
+        # returns True on recovery.
+        calls = {"n": 0}
+
+        def flaky_urlopen(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.URLError("boom")
+            class _Resp:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def read(self_): return b""
+            return _Resp()
+
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
+            side_effect=flaky_urlopen,
+        ), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep"):
+            ok = publish_forever(self._cfg(), "bwd", {"task_id": "t3"})
+        self.assertTrue(ok)
+        self.assertEqual(calls["n"], 3)
+
+    def test_publish_forever_succeeds_before_deadline(self) -> None:
+        # First attempt already succeeds; deadline is generous. Ensure
+        # the deadline plumbing does not accidentally short-circuit the
+        # happy path.
+        class _Resp:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return b""
+
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
+            return_value=_Resp(),
+        ) as urlopen_mock, \
+             mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep"):
+            ok = publish_forever(
+                self._cfg(), "bwd", {"task_id": "t4"},
+                deadline_monotonic=time.monotonic() + 60.0,
+            )
+        self.assertTrue(ok)
+        urlopen_mock.assert_called_once()
 
 
 if __name__ == "__main__":

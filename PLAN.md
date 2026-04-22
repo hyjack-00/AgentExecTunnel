@@ -160,11 +160,25 @@
 - [x] 文档：DESIGN.md 「File plane」章节重写；README "File plane (GitHub + ntfy verification)" + CLI 块同步；PLAN §8.6；reviews + evaluations
 - [x] VERSION → v0.4、PACKAGE_VERSION → v0.4、tag v0.4
 
+### 8.7 v0.4.1：executor 侧 wire 预算 + 有界重试 ✅
+
+**触发**：用户澄清 relay host 的 VPN 监管对 HTTP/S 包尺寸有 80–100KB 的硬上限，超了静默丢包。executor → ntfy.sh 的 publish 会不可见地失败；而 `publish_forever` 又是真的 "forever"，worker 线程卡死。
+
+- [x] `Settings.ntfy_result_wire_budget_bytes: int = 60_000`（env：`AET_NTFY_RESULT_WIRE_BUDGET_BYTES`）
+- [x] `executor._truncate_result_envelope(envelope, budget)`：tail 超预算时裁剪到"尾巴的尾巴"并前置 `[truncated by executor: original NB, envelope wire budget NB]` 说明
+- [x] `ntfy_transport.publish_forever(..., deadline_monotonic=None)`：新增 deadline 参数；过期前/过期后 sleep 之前双重检查，返回 False
+- [x] `executor._publish_ack` / `_publish_result` 都把 `task.timeout_seconds` 全额作为重试预算（不做 `timeout - command_elapsed` 减法）
+- [x] 11 个新增测试（4 个 deadline + 5 个 truncate + 1 个 integration + 1 个 drive-by fix 陈旧 topic 断言），77 → 88 passing
+- [x] DESIGN.md + README.md 更新；reviews/v0.4.1.md + evaluations/v0.4.1.md
+- [x] VERSION → v0.4.1；PACKAGE_VERSION → v0.4.1；tag v0.4.1
+
 ### 9. 已知问题 & 已解决项备忘
 
 **未解决（留给未来）**：
 
 - [ ] **跨 executor shell 语法挂钩**：一台 executor 只能跑一种 shell（v0.3.2 起 `executor_shell` 配置化、默认 `/bin/bash`）。要同时跑 bash 与 powershell 任务需要两个 executor（不同 ntfy topic），或在 envelope 加 per-task `shell` hint（会打破 v0.3 的 unified transport）。目前无压力解决。
+- [ ] **入向 GET 聚合响应可能超过 VPN 审计上限**：executor 的 `poll_since` 响应在 `poll_since="10m"` 窗口内高频任务场景下可累积到接近 audit cap。目前靠窗口缩短缓解，未做 `since=<message-id>` 增量拉取。v0.4.2 候选。
+- [ ] **`TailBuffer.limit=4000` 是字符不是字节**：v0.4.1 的 wire budget 在出口兜底覆盖了这个坑，但根本上应把 TailBuffer 改为按字节限。v0.4.2 候选（伴随上面那条一起做）。
 
 **已解决（此前记在 §9 但其实已做完或已在 v0.3.4 关闭）**：
 

@@ -36,8 +36,13 @@ class CliEntrypointTests(unittest.TestCase):
         self.assertEqual(settings.workspace_root, ROOT)
         self.assertEqual(settings.forward_root, ROOT / "agent_forward")
         self.assertFalse(hasattr(settings, "backward_root"))
-        self.assertEqual(settings.ntfy_forward_topic, "agent-forward-285")
-        self.assertEqual(settings.ntfy_backward_topic, "agent-backward-285")
+        # Topic names are configured per-deployment; assert only that the
+        # defaults are non-empty strings and that forward != backward.
+        self.assertIsInstance(settings.ntfy_forward_topic, str)
+        self.assertIsInstance(settings.ntfy_backward_topic, str)
+        self.assertTrue(settings.ntfy_forward_topic)
+        self.assertTrue(settings.ntfy_backward_topic)
+        self.assertNotEqual(settings.ntfy_forward_topic, settings.ntfy_backward_topic)
         self.assertEqual(settings.default_timeout_seconds, 300)
 
     def test_submit_plain_submits_raw_payload(self) -> None:

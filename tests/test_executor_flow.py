@@ -5,7 +5,7 @@ import unittest
 from datetime import timedelta
 from unittest import mock
 
-from agent_exec_tunnel.executor import Executor
+from agent_exec_tunnel.executor import Executor, _truncate_result_envelope, _envelope_size
 from agent_exec_tunnel.protocol import iso_z, utc_now
 
 
@@ -184,7 +184,7 @@ class AckEnvelopeTests(unittest.TestCase):
         executor = Executor(executor_id="exec-42:1")
         captured: list[dict] = []
 
-        def capture(cfg, topic, envelope, *, log=None, stop=None, max_backoff_seconds=30.0):
+        def capture(cfg, topic, envelope, *, log=None, stop=None, max_backoff_seconds=30.0, deadline_monotonic=None):
             captured.append(envelope)
             return True
 
@@ -195,6 +195,97 @@ class AckEnvelopeTests(unittest.TestCase):
         self.assertEqual(ack_env["task_id"], "ack-test")
         self.assertEqual(ack_env["executor_id"], "exec-42:1")
         self.assertIn("ack_at", ack_env)
+
+
+class TruncateResultEnvelopeTests(unittest.TestCase):
+    """v0.4.1: before backward publish, oversized result envelopes get
+    their stdout/stderr tails shrunk so the JSON body fits under the
+    configured wire budget (VPN audit cap). Metadata is untouched."""
+
+    def _base(self, **overrides) -> dict:
+        env = {
+            "kind": "result",
+            "version": "v0.4.1",
+            "task_id": "trunc-1",
+            "executor_id": "exec:1",
+            "status": "done",
+            "started_at": "2026-04-22T03:00:00Z",
+            "finished_at": "2026-04-22T03:00:01Z",
+            "exit_code": 0,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "command_digest": "sha256:" + "0" * 64,
+            "process_ref": "pid:1",
+            "stale_at": None,
+        }
+        env.update(overrides)
+        return env
+
+    def test_truncate_is_noop_when_under_budget(self) -> None:
+        env = self._base(stdout_tail="small output", stderr_tail="")
+        out = _truncate_result_envelope(env, budget_bytes=10_000)
+        self.assertIs(out, env)  # same object — no copy when under budget
+
+    def test_oversize_envelope_fits_under_budget(self) -> None:
+        # Pathological case: 4000 NUL chars → JSON-escaped `\u0000` = 24 KB.
+        # Budget 8 KB forces truncation.
+        env = self._base(stdout_tail="\x00" * 4000, stderr_tail="\x00" * 4000)
+        budget = 8000
+        self.assertGreater(_envelope_size(env), budget)
+        out = _truncate_result_envelope(env, budget_bytes=budget)
+        self.assertLessEqual(_envelope_size(out), budget)
+
+    def test_truncated_envelope_preserves_tail_of_original(self) -> None:
+        # The END-MARKER is the last few chars of stdout; truncation keeps
+        # the *tail* of the tail so the marker survives.
+        stdout = ("A" * 60_000) + "END-MARKER"
+        env = self._base(stdout_tail=stdout)
+        out = _truncate_result_envelope(env, budget_bytes=5000)
+        self.assertIn("END-MARKER", out["stdout_tail"])
+        self.assertTrue(out["stdout_tail"].startswith("[truncated by executor:"))
+
+    def test_truncation_note_reports_original_byte_count(self) -> None:
+        # Note must mention the pre-truncation size so operators know how
+        # much was discarded.
+        env = self._base(stdout_tail="X" * 50_000)
+        out = _truncate_result_envelope(env, budget_bytes=5000)
+        self.assertIn(str(len(("X" * 50_000).encode("utf-8"))), out["stdout_tail"])
+        self.assertIn("5000", out["stdout_tail"])  # budget
+
+    def test_truncate_preserves_metadata_fields(self) -> None:
+        env = self._base(stdout_tail="X" * 80_000, stderr_tail="Y" * 80_000)
+        out = _truncate_result_envelope(env, budget_bytes=6000)
+        for k in ("task_id", "status", "exit_code", "command_digest",
+                  "executor_id", "started_at", "finished_at", "process_ref"):
+            self.assertEqual(out[k], env[k], f"field {k!r} mutated by truncation")
+
+
+class PublishResultDeadlineTests(unittest.TestCase):
+    """v0.4.1: _publish_result passes a deadline derived from the task's
+    own timeout_seconds down to publish_forever, so a wedged backward
+    publish does not outlive the submitter's wait budget."""
+
+    def test_executor_publish_result_passes_task_timeout_as_deadline(self) -> None:
+        executor = Executor(executor_id="exec-dl:1")
+        captured_kwargs: list[dict] = []
+
+        def capture(cfg, topic, envelope, *, log=None, stop=None,
+                    max_backoff_seconds=30.0, deadline_monotonic=None):
+            captured_kwargs.append({"deadline": deadline_monotonic, "envelope": envelope})
+            return True
+
+        with mock.patch("agent_exec_tunnel.executor.publish_forever", side_effect=capture):
+            executor._handle_task_envelope(
+                _make_envelope(task_id="dl-1", command="echo ok", timeout_seconds=7)
+            )
+            self.assertTrue(executor.wait_for_task("dl-1", timeout=5.0))
+
+        # First publish is the ACK, second is the result — both must
+        # carry a deadline. They should be within ~ a few seconds of
+        # (now + task_timeout) since the worker starts immediately.
+        self.assertGreaterEqual(len(captured_kwargs), 2)
+        for entry in captured_kwargs:
+            self.assertIsNotNone(entry["deadline"])
 
 
 if __name__ == "__main__":
