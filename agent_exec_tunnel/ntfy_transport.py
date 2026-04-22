@@ -26,6 +26,8 @@ from typing import Callable, Iterable
 #   You can also set `AET_NTFY_TOKEN` in the environment; env wins over
 #   the hardcoded default so you can keep the repo clean.
 #
+
+# free account, no need to worry about leaking
 NTFY_AUTH_TOKEN = "tk_pdq3tyk4dxkdazgcjvlwhht9pltzb"  # ← paste your ntfy token here
 _NTFY_AUTH_TOKEN = os.environ.get("AET_NTFY_TOKEN", NTFY_AUTH_TOKEN)
 
