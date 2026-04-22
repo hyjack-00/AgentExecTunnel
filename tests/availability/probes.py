@@ -19,25 +19,11 @@ DEFAULT_PROBES = {
         command="echo availability-relay",
         implies_ok=("relay",),
     ),
-    "ssh_echo": ProbeSpec(
-        probe_id="ssh_echo",
-        submit_mode="ssh",
-        target_host="H20",
-        command="echo availability-ssh",
-        implies_ok=("relay", "H20"),
-    ),
     "ssh_h20_echo": ProbeSpec(
         probe_id="ssh_h20_echo",
         submit_mode="ssh",
         target_host="H20",
         command="echo availability-ssh",
-        implies_ok=("relay", "H20"),
-    ),
-    "ssh_h20_hostname": ProbeSpec(
-        probe_id="ssh_h20_hostname",
-        submit_mode="ssh",
-        target_host="H20",
-        command="hostname",
         implies_ok=("relay", "H20"),
     ),
     "ssh_h20_nvidia_smi": ProbeSpec(
@@ -52,6 +38,13 @@ DEFAULT_PROBES = {
         submit_mode="ssh",
         target_host="950",
         command="echo availability-950",
+        implies_ok=("relay", "950"),
+    ),
+    "ssh_950_npu_smi": ProbeSpec(
+        probe_id="ssh_950_npu_smi",
+        submit_mode="ssh",
+        target_host="950",
+        command="npu-smi info",
         implies_ok=("relay", "950"),
     ),
     "ssh_910_echo": ProbeSpec(

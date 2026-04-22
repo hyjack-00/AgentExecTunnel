@@ -13,9 +13,9 @@ Two world-readable topics on `https://ntfy.sh`:
 
 Executor polls `/{topic}/json?poll=1&since=10m` with base 5s cadence and upward jitter capped at `ntfy_poll_cap_seconds` (default 300s — v0.4.2 decoupled from the task-timeout budget). Idle saturation puts each poll into a wide `[5, 300]s` window to blur the periodic-beacon signature that corporate gateways use to auto-isolate new domains. Jitter grows on both idle and error; any new envelope resets it. Submitter uses the same primitive (`wait_for(task_id)`) on the backward topic with its own cap = `result_timeout_seconds / 2`.
 
-Dedup is task_id-keyed and in-memory on both sides. Executor seeds its `seen_ids` on startup from a one-time poll of the backward topic so a restart within the 2h replay window does not re-run already-finished tasks.
+Dedup is task_id-keyed and in-memory on both sides. Executor seeds its `seen_ids` on startup from a one-time poll of the backward topic so a restart within the 10m replay window does not re-run already-finished tasks.
 
-The message plane has **no ACK layer** and **no authentication** — if the executor crashes mid-task and restarts within 2h, the task may re-run once; anyone who guesses the topic can inject a task envelope. MVP assumes a trusted environment. Add HMAC signing or a private ntfy instance for production use.
+The message plane has **no ACK layer** and **no authentication** — if the executor crashes mid-task and restarts within 10m, the task may re-run once; anyone who guesses the topic can inject a task envelope. MVP assumes a trusted environment. Add HMAC signing or a private ntfy instance for production use.
 
 ## File plane (GitHub + ntfy verification)
 
@@ -158,14 +158,14 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 
 ## Resilience
 
-- **Executor crash mid-task**: on restart, `seen_ids` is seeded from the backward topic's 2h window. Completed tasks do not re-run. Tasks that were still in flight when the executor died are eligible to re-run once if the forward envelope is still in the 2h window — intentional MVP trade-off; add persistent ACK for strict at-most-once.
+- **Executor crash mid-task**: on restart, `seen_ids` is seeded from the backward topic's 10m window. Completed tasks do not re-run. Tasks that were still in flight when the executor died are eligible to re-run once if the forward envelope is still in the 10m window — intentional MVP trade-off; add persistent ACK for strict at-most-once.
 - **Backward ntfy publish failure**: the executor does not silently drop the result. It spools a `ResultRecord` into `pending_results` and every forward-poll tick retries publish. The task is not marked `seen_ids` until publish succeeds.
 - **Forward ntfy poll failure**: jitter grows instead of hammering the server, so a flaky ntfy doesn't turn into a self-DoS loop.
 - **Submitter timeout**: `wait_for_result` adds `submit_timeout_grace_seconds` on top of the task timeout so the executor's own stale result envelope has time to arrive. Failure modes differentiate "ntfy unreachable" vs "ntfy reachable but executor silent".
 
 ## Availability
 
-`tests/availability/` records probe results into `var/availability/data-YYYYMMDD.jsonl` and renders an HTML dashboard with hop-availability cards, p50/p95/p99 latency, preview/total stage timings, a 24h hourly heartbeat SVG, per-probe table, and recent-failures list.
+`tests/availability/` records probe results into `var/availability/data-YYYYMMDD.jsonl` and renders an HTML dashboard with hop-availability cards, p50/p95/p99 latency, preview/total stage timings, a 24h heartbeat SVG in 2h buckets, a 20-bucket latency distribution chart, a per-probe table, and a recent-failures list.
 
 ```bash
 python3 tests/availability/probe.py --mode remote_relay --mean-period 300

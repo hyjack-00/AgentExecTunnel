@@ -55,9 +55,9 @@ except ImportError:  # pragma: no cover - optional dependency
 @dataclass(frozen=True)
 class NtfyConfig:
     server_url: str = "https://ntfy.sh"
-    forward_topic: str = "agent-forward-285"
-    backward_topic: str = "agent-backward-285"
-    poll_since: str = "2h"
+    forward_topic: str = "FWJKhsad"
+    backward_topic: str = "BWaskljd"
+    poll_since: str = "10m"
     poll_base_seconds: float = 1.0
     poll_jitter_growth: float = 1.10
     poll_jitter_floor: float = 0.05

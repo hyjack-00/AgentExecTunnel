@@ -111,19 +111,22 @@ def _fmt_lat(v: float | None) -> str:
     return f"{v:.2f} s"
 
 
-def _hourly_buckets(records: list[dict], hours: int = 24) -> list[dict]:
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+def _time_buckets(records: list[dict], bucket_hours: int = 2, bucket_count: int = 12) -> list[dict]:
+    now_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    now = now_hour - timedelta(hours=now_hour.hour % bucket_hours)
     buckets = []
-    for i in range(hours):
-        start = now - timedelta(hours=hours - 1 - i)
+    for i in range(bucket_count):
+        start = now - timedelta(hours=bucket_hours * (bucket_count - 1 - i))
         buckets.append({"start": start, "ok": 0, "fail": 0})
     for rec in records:
         ts = rec.get("_ts")
         if not ts:
             continue
-        delta = now - ts.replace(minute=0, second=0, microsecond=0)
-        idx = hours - 1 - int(delta.total_seconds() // 3600)
-        if 0 <= idx < hours:
+        ts_hour = ts.replace(minute=0, second=0, microsecond=0)
+        bucket_start = ts_hour - timedelta(hours=ts_hour.hour % bucket_hours)
+        delta = now - bucket_start
+        idx = bucket_count - 1 - int(delta.total_seconds() // (bucket_hours * 3600))
+        if 0 <= idx < bucket_count:
             if rec.get("outcome") == OK:
                 buckets[idx]["ok"] += 1
             else:
@@ -165,10 +168,83 @@ def _render_timeline_svg(buckets: list[dict]) -> str:
                     f'<rect x="{x+4}" y="{y_ok_top:.1f}" width="{width_per_bucket-8}" '
                     f'height="{h_ok:.1f}" fill="#2e7d32"/>'
                 )
-        label = b["start"].strftime("%H")
+        end = b["start"] + timedelta(hours=2)
+        label = f"{b['start'].strftime('%H')}-{end.strftime('%H')}"
         svg.append(
             f'<text x="{x + width_per_bucket/2}" y="{height - 6}" '
-            f'fill="#8b949e" font-size="10" text-anchor="middle">{label}</text>'
+            f'fill="#8b949e" font-size="9" text-anchor="middle">{label}</text>'
+        )
+    svg.append("</svg>")
+    return "".join(svg)
+
+
+def _latency_distribution(records: list[dict]) -> list[dict]:
+    bins = [
+        (0.0, 0.1, "<100ms"),
+        (0.1, 0.2, "100-200ms"),
+        (0.2, 0.3, "200-300ms"),
+        (0.3, 0.5, "300-500ms"),
+        (0.5, 0.75, "500-750ms"),
+        (0.75, 1.0, "750ms-1s"),
+        (1.0, 1.5, "1-1.5s"),
+        (1.5, 2.0, "1.5-2s"),
+        (2.0, 3.0, "2-3s"),
+        (3.0, 5.0, "3-5s"),
+        (5.0, 7.5, "5-7.5s"),
+        (7.5, 10.0, "7.5-10s"),
+        (10.0, 15.0, "10-15s"),
+        (15.0, 20.0, "15-20s"),
+        (20.0, 30.0, "20-30s"),
+        (30.0, 45.0, "30-45s"),
+        (45.0, 60.0, "45-60s"),
+        (60.0, 90.0, "60-90s"),
+        (90.0, 120.0, "90-120s"),
+        (120.0, float("inf"), "≥120s"),
+    ]
+    out = [{"label": label, "count": 0} for _, _, label in bins]
+    for rec in records:
+        if rec.get("outcome") != OK or not isinstance(rec.get("latency_s"), (int, float)):
+            continue
+        latency = float(rec["latency_s"])
+        for idx, (lo, hi, _) in enumerate(bins):
+            if lo <= latency < hi:
+                out[idx]["count"] += 1
+                break
+    return out
+
+
+def _render_latency_distribution_svg(buckets: list[dict]) -> str:
+    width_per_bucket = 70
+    height = 140
+    pad_top = 14
+    pad_bot = 28
+    w = width_per_bucket * len(buckets) + 20
+    chart_h = height - pad_top - pad_bot
+    max_count = max((b["count"] for b in buckets), default=0) or 1
+    svg = [f'<svg viewBox="0 0 {w} {height}" xmlns="http://www.w3.org/2000/svg" class="latdist">']
+    svg.append(f'<rect x="0" y="0" width="{w}" height="{height}" fill="#161b22"/>')
+    for i, b in enumerate(buckets):
+        x = 10 + i * width_per_bucket
+        count = b["count"]
+        if count == 0:
+            svg.append(
+                f'<rect x="{x+8}" y="{pad_top + chart_h - 2}" width="{width_per_bucket-16}" '
+                f'height="2" fill="#30363d"/>'
+            )
+        else:
+            h = chart_h * count / max_count
+            y = pad_top + chart_h - h
+            svg.append(
+                f'<rect x="{x+8}" y="{y:.1f}" width="{width_per_bucket-16}" '
+                f'height="{h:.1f}" fill="#58a6ff"/>'
+            )
+            svg.append(
+                f'<text x="{x + width_per_bucket/2}" y="{max(10, y - 3):.1f}" '
+                f'fill="#c9d1d9" font-size="10" text-anchor="middle">{count}</text>'
+            )
+        svg.append(
+            f'<text x="{x + width_per_bucket/2}" y="{height - 8}" '
+            f'fill="#8b949e" font-size="10" text-anchor="middle">{html.escape(b["label"])}</text>'
         )
     svg.append("</svg>")
     return "".join(svg)
@@ -257,7 +333,8 @@ def render_html(root: Path, mode_label: str) -> str:
         </table>
     '''
 
-    timeline_svg = _render_timeline_svg(_hourly_buckets(recs_24h))
+    timeline_svg = _render_timeline_svg(_time_buckets(recs_24h, bucket_hours=2, bucket_count=12))
+    latency_distribution_svg = _render_latency_distribution_svg(_latency_distribution(recs_24h))
 
     probe_rows = _per_probe_table(recs_24h)
     probe_rows_html = "".join(
@@ -310,6 +387,7 @@ def render_html(root: Path, mode_label: str) -> str:
  .muted {{ color:#8b949e; }}
  .mono-sm {{ font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-size:12px; color:#8b949e; }}
  .timeline {{ width:100%; max-width:900px; display:block; border:1px solid #30363d; border-radius:6px; }}
+ .latdist {{ width:100%; max-width:760px; display:block; border:1px solid #30363d; border-radius:6px; }}
  .panel {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:14px 18px; display:inline-block; }}
 </style>
 </head><body>
@@ -329,8 +407,11 @@ def render_html(root: Path, mode_label: str) -> str:
 <h2>stage timings · mean (ok probes)</h2>
 <div class="panel">{stage_panel}</div>
 
-<h2>heartbeat · last 24h (hourly)</h2>
+<h2>heartbeat · last 24h (2h buckets)</h2>
 {timeline_svg}
+
+<h2>latency distribution · last 24h (ok probes)</h2>
+{latency_distribution_svg}
 
 <h2>per-probe · last 24h</h2>
 <table>

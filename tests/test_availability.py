@@ -11,7 +11,12 @@ from unittest import mock
 from tests.availability import probe as availability_probe
 from tests.availability import storage
 from tests.availability.probes import PROBES, all_tags
-from tests.availability.report import render_html, generate
+from tests.availability.report import (
+    _latency_distribution,
+    _time_buckets,
+    generate,
+    render_html,
+)
 
 
 def _write_record(root: Path, rec: dict) -> None:
@@ -115,6 +120,9 @@ class ReportSectionsTests(unittest.TestCase):
             # SVG timeline
             self.assertIn("<svg", html_text)
             self.assertIn('class="timeline"', html_text)
+            self.assertIn("heartbeat · last 24h (2h buckets)", html_text)
+            self.assertIn('class="latdist"', html_text)
+            self.assertIn("latency distribution · last 24h", html_text)
 
             # per-probe table
             self.assertIn("per-probe", html_text)
@@ -139,6 +147,38 @@ class ReportSectionsTests(unittest.TestCase):
             self.assertIn("availability (by hop)", html_text)
             self.assertIn("<svg", html_text)
             self.assertIn("no failures in window", html_text)
+
+    def test_time_buckets_group_two_hours(self) -> None:
+        now = datetime(2026, 4, 22, 11, 30, tzinfo=timezone.utc)
+        records = [
+            {"_ts": now - timedelta(minutes=10), "outcome": "ok"},
+            {"_ts": now - timedelta(hours=1, minutes=50), "outcome": "exit_nonzero"},
+            {"_ts": now - timedelta(hours=2, minutes=5), "outcome": "ok"},
+        ]
+        with mock.patch("tests.availability.report.datetime") as dt:
+            dt.now.return_value = now
+            dt.min = datetime.min
+            buckets = _time_buckets(records, bucket_hours=2, bucket_count=3)
+
+        self.assertEqual(buckets[-1]["start"], datetime(2026, 4, 22, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(buckets[-1]["ok"], 1)
+        self.assertEqual(buckets[-1]["fail"], 0)
+        self.assertEqual(buckets[-2]["start"], datetime(2026, 4, 22, 8, 0, tzinfo=timezone.utc))
+        self.assertEqual(buckets[-2]["ok"], 1)
+        self.assertEqual(buckets[-2]["fail"], 1)
+
+    def test_latency_distribution_counts_ok_records_only(self) -> None:
+        dist = _latency_distribution([
+            {"outcome": "ok", "latency_s": 0.5},
+            {"outcome": "ok", "latency_s": 7.0},
+            {"outcome": "ok", "latency_s": 130.0},
+            {"outcome": "exit_nonzero", "latency_s": 0.2},
+        ])
+        by_label = {row["label"]: row["count"] for row in dist}
+        self.assertEqual(len(dist), 20)
+        self.assertEqual(by_label["500-750ms"], 1)
+        self.assertEqual(by_label["5-7.5s"], 1)
+        self.assertEqual(by_label["≥120s"], 1)
 
 
 class ProbeDriverTests(unittest.TestCase):
