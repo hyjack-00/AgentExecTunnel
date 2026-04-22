@@ -294,15 +294,16 @@ def poll_loop(
     jitter_max = 0.0
     failure_streak = 0
     while not stop():
+        retry_after_wait: float | None = None
         try:
             envelopes = poll_since(cfg, topic)
             poll_ok = True
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             failure_streak += 1
-            wait = base + jitter_max / 2
+            retry_after_wait = _retry_after_seconds(exc, base + jitter_max / 2)
             log(
                 _colorize_retry(
-                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{wait:.1f}s",
+                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{retry_after_wait:.1f}s",
                     failure_streak,
                 )
             )
@@ -310,7 +311,10 @@ def poll_loop(
         if not poll_ok:
             # Outage: grow the jitter so we don't DoS a flaky ntfy.sh.
             jitter_max = _bump_jitter(jitter_max, cfg.poll_jitter_growth, cfg.poll_jitter_floor, cap_jitter)
-            _sleep_remaining(base, jitter_max, None)
+            if retry_after_wait is not None and retry_after_wait > 0:
+                time.sleep(retry_after_wait)
+            else:
+                _sleep_remaining(base, jitter_max, None)
             continue
         failure_streak = 0
         new_envelopes = [
@@ -356,21 +360,25 @@ def wait_for(
         remaining = deadline_monotonic - time.monotonic()
         if remaining <= 0:
             return None, last_poll_ok
+        retry_after_wait: float | None = None
         try:
             envelopes = poll_since(cfg, topic)
             last_poll_ok = True
             failure_streak = 0
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             failure_streak += 1
-            wait = min(remaining, base + jitter_max / 2)
+            retry_after_wait = min(remaining, _retry_after_seconds(exc, base + jitter_max / 2))
             log(
                 _colorize_retry(
-                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{wait:.1f}s",
+                    f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{retry_after_wait:.1f}s",
                     failure_streak,
                 )
             )
             last_poll_ok = False
-            _sleep_remaining(base, jitter_max, remaining)
+            if retry_after_wait > 0:
+                time.sleep(retry_after_wait)
+            else:
+                _sleep_remaining(base, jitter_max, remaining)
             continue
         for env in envelopes:
             if env.get("task_id") != task_id:

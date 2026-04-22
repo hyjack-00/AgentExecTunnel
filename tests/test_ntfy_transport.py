@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import unittest
 from unittest import mock
 
@@ -175,6 +176,29 @@ class PollLoopRetryLoggingTests(unittest.TestCase):
         self.assertEqual(len(logs), 2)
         self.assertIn("retry=1", logs[0])
         self.assertIn("retry=2", logs[1])
+
+    def test_poll_loop_honors_retry_after_on_poll_error(self) -> None:
+        cfg = NtfyConfig(poll_base_seconds=0.01, poll_jitter_growth=1.0, poll_jitter_floor=0.0)
+        calls = {"count": 0}
+
+        def fake_poll_since(*args, **kwargs):
+            calls["count"] += 1
+            raise urllib.error.HTTPError(
+                "https://ntfy.sh/topic/json?poll=1",
+                429,
+                "Too Many Requests",
+                {"Retry-After": "7"},
+                None,
+            )
+
+        def stop() -> bool:
+            return calls["count"] >= 1
+
+        with mock.patch("agent_exec_tunnel.ntfy_transport.poll_since", side_effect=fake_poll_since), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep") as sleep_mock:
+            poll_loop(cfg, "topic", lambda env: None, lambda task_id: False, cap_seconds=0.1, stop=stop)
+
+        sleep_mock.assert_called_once_with(7.0)
 
 
 if __name__ == "__main__":
