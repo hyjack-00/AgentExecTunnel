@@ -79,7 +79,7 @@ class Settings:
     # long-running executor does not grow memory without bound. Kept at 2×
     # the poll window so even a near-edge replay still dedups correctly.
     seen_ids_ttl_seconds: float = 3600.0
-    ntfy_poll_base_seconds: float = 1.0
+    ntfy_poll_base_seconds: float = 3.0
     ntfy_poll_jitter_growth: float = 1.5
     ntfy_poll_jitter_floor: float = 0.05
     # Grace on top of task timeout for the submitter to absorb the
