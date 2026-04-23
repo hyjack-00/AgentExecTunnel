@@ -16,6 +16,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import random
 import shlex
 import subprocess
 import sys
@@ -126,7 +127,7 @@ def _push_with_retry(forward_root: Path, message: str) -> bool:
                 f"git push attempt {attempt}/{UPLOAD_RETRY_ATTEMPTS} failed: {err}\n"
             )
             if attempt < UPLOAD_RETRY_ATTEMPTS:
-                time.sleep(UPLOAD_RETRY_DELAY_SECONDS)
+                time.sleep(random.uniform(UPLOAD_RETRY_DELAY_SECONDS * 0.8, UPLOAD_RETRY_DELAY_SECONDS * 1.2))
     return False
 
 

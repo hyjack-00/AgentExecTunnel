@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import time
@@ -102,7 +103,8 @@ def git_commit_push(
             except subprocess.CalledProcessError:
                 _maybe_abort_rebase(repo_root)
                 raise
-            time.sleep(min(0.02 * attempt, 0.5))
+            retry_delay = min(0.02 * attempt, 0.5)
+            time.sleep(random.uniform(retry_delay * 0.8, retry_delay * 1.2))
     assert last_error is not None
     raise last_error
 

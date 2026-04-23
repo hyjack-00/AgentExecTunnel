@@ -140,22 +140,50 @@ def _colorize_retry(message: str, attempt: int) -> str:
     return f"{prefix}{message}\033[0m"
 
 
-def _retry_after_seconds(exc: BaseException, default: float) -> float:
-    """Pull the server-suggested wait from a 429/503 `Retry-After` header if
-    present. Returns `default` otherwise."""
+def _retry_after_header_seconds(exc: BaseException) -> float | None:
+    """Pull the server-suggested wait from a 429/503 `Retry-After` header."""
     headers = getattr(exc, "headers", None)
     if headers is None:
-        return default
+        return None
     try:
         raw = headers.get("Retry-After")
     except Exception:  # noqa: BLE001
         raw = None
     if not raw:
-        return default
+        return None
     try:
         return max(0.0, float(raw))
     except ValueError:
+        return None
+
+
+def _retry_after_seconds(exc: BaseException, default: float) -> float:
+    """Pull `Retry-After` if present. Returns `default` otherwise."""
+    retry_after = _retry_after_header_seconds(exc)
+    if retry_after is None:
         return default
+    return retry_after
+
+
+def _jittered_delay_seconds(delay: float, *, min_factor: float = 0.8, max_factor: float = 1.2) -> float:
+    if delay <= 0:
+        return 0.0
+    lo = max(0.0, delay * min_factor)
+    hi = max(lo, delay * max_factor)
+    return random.uniform(lo, hi)
+
+
+def _retry_delay_seconds(exc: BaseException, default: float) -> float:
+    """Network retry delay with jitter.
+
+    For server-provided `Retry-After`, never sleep less than the requested
+    value; add up to 20% random spread so many clients do not wake together.
+    For local fallback delays, jitter around the target by ±20%.
+    """
+    retry_after = _retry_after_header_seconds(exc)
+    if retry_after is not None:
+        return retry_after + random.uniform(0.0, retry_after * 0.2)
+    return _jittered_delay_seconds(default)
 
 
 def _publish_retry_delay_seconds(attempt: int) -> float:
@@ -205,7 +233,7 @@ def publish(cfg: NtfyConfig, topic: str, envelope: dict) -> None:
             last_err = exc
             if attempt >= cfg.publish_max_attempts:
                 break
-            time.sleep(_retry_after_seconds(exc, _publish_retry_delay_seconds(attempt)))
+            time.sleep(_retry_delay_seconds(exc, _publish_retry_delay_seconds(attempt)))
     raise NtfyPublishError(
         f"ntfy publish failed topic={topic} attempts={cfg.publish_max_attempts} error={last_err}"
     )
@@ -248,7 +276,7 @@ def publish_forever(
                 log(f"ntfy publish_forever recovered topic={topic} attempts={attempt}")
             return True
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            wait = _retry_after_seconds(exc, backoff)
+            wait = _retry_delay_seconds(exc, backoff)
             # If sleeping would cross the deadline, shorten the sleep or
             # bail immediately. This keeps the upper bound tight even when
             # Retry-After pushes us past the budget.
@@ -330,7 +358,7 @@ def poll_loop(
             poll_ok = True
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             failure_streak += 1
-            retry_after_wait = _retry_after_seconds(exc, base + jitter_max / 2)
+            retry_after_wait = _retry_delay_seconds(exc, base + jitter_max / 2)
             log(
                 _colorize_retry(
                     f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{retry_after_wait:.1f}s",
@@ -397,7 +425,7 @@ def wait_for(
             failure_streak = 0
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             failure_streak += 1
-            retry_after_wait = min(remaining, _retry_after_seconds(exc, base + jitter_max / 2))
+            retry_after_wait = min(remaining, _retry_delay_seconds(exc, base + jitter_max / 2))
             log(
                 _colorize_retry(
                     f"ntfy poll error topic={topic} retry={failure_streak} error={exc} next_in~{retry_after_wait:.1f}s",

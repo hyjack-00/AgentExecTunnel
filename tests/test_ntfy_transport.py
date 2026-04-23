@@ -12,7 +12,9 @@ from agent_exec_tunnel.ntfy_transport import (
     _attachment_maybe_json,
     _auth_header,
     _colorize_retry,
+    _jittered_delay_seconds,
     _publish_retry_delay_seconds,
+    _retry_delay_seconds,
     _record_to_envelope,
     poll_since,
     poll_loop,
@@ -72,6 +74,23 @@ class RetryLogFormattingTests(unittest.TestCase):
         self.assertEqual(_publish_retry_delay_seconds(2), 10.0)
         self.assertEqual(_publish_retry_delay_seconds(3), 15.0)
 
+    def test_jittered_delay_randomizes_around_target(self) -> None:
+        with mock.patch("agent_exec_tunnel.ntfy_transport.random.uniform", return_value=5.5) as uniform:
+            self.assertEqual(_jittered_delay_seconds(5.0), 5.5)
+        uniform.assert_called_once_with(4.0, 6.0)
+
+    def test_retry_delay_respects_retry_after_as_floor(self) -> None:
+        err = urllib.error.HTTPError(
+            "https://ntfy.sh/topic",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "10"},
+            None,
+        )
+        with mock.patch("agent_exec_tunnel.ntfy_transport.random.uniform", return_value=1.25) as uniform:
+            self.assertEqual(_retry_delay_seconds(err, 5.0), 11.25)
+        uniform.assert_called_once_with(0.0, 2.0)
+
 
 class PublishRetryTests(unittest.TestCase):
     def test_publish_uses_larger_retry_delays(self) -> None:
@@ -86,10 +105,13 @@ class PublishRetryTests(unittest.TestCase):
         with mock.patch(
             "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
             side_effect=[err, err, err],
+        ), mock.patch(
+            "agent_exec_tunnel.ntfy_transport.random.uniform",
+            side_effect=[4.5, 11.0],
         ), mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep") as sleep_mock:
             with self.assertRaises(ntfy_transport.NtfyPublishError):
                 publish(cfg, "topic", {"task_id": "t1"})
-        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [5.0, 10.0])
+        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [4.5, 11.0])
 
 
 class AttachmentEnvelopeTests(unittest.TestCase):
@@ -222,10 +244,11 @@ class PollLoopRetryLoggingTests(unittest.TestCase):
             return calls["count"] >= 1
 
         with mock.patch("agent_exec_tunnel.ntfy_transport.poll_since", side_effect=fake_poll_since), \
+             mock.patch("agent_exec_tunnel.ntfy_transport.random.uniform", return_value=1.5), \
              mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep") as sleep_mock:
             poll_loop(cfg, "topic", lambda env: None, lambda task_id: False, cap_seconds=0.1, stop=stop)
 
-        sleep_mock.assert_called_once_with(7.0)
+        sleep_mock.assert_called_once_with(8.5)
 
 
 class PublishForeverDeadlineTests(unittest.TestCase):
