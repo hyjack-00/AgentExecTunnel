@@ -24,6 +24,11 @@ from tests.availability.probes import all_tags
 OK = "ok"
 
 
+class _AvailabilityTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def _percentile(sorted_values: list[float], p: float) -> float | None:
     if not sorted_values:
         return None
@@ -47,27 +52,6 @@ def _latency_stats(records: list[dict]) -> dict:
         "p99": _percentile(lats, 0.99),
         "count": len(lats),
     }
-
-
-def _mean(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def _stage_stats(records: list[dict]) -> dict[str, dict]:
-    field_map = {
-        "preview_latency_s": "preview",
-        "latency_s": "total",
-    }
-    out: dict[str, dict] = {}
-    for field, label in field_map.items():
-        vals = [
-            float(r[field]) for r in records
-            if r.get("outcome") == OK and isinstance(r.get(field), (int, float))
-        ]
-        out[label] = {"mean": _mean(vals), "count": len(vals)}
-    return out
 
 
 def _tag_availability(records: list[dict], tag: str) -> tuple[int, int]:
@@ -135,7 +119,7 @@ def _time_buckets(records: list[dict], bucket_hours: int = 2, bucket_count: int 
 
 
 def _render_timeline_svg(buckets: list[dict]) -> str:
-    width_per_bucket = 32
+    width_per_bucket = 98
     height = 120
     pad_top = 10
     pad_bot = 20
@@ -180,26 +164,26 @@ def _render_timeline_svg(buckets: list[dict]) -> str:
 
 def _latency_distribution(records: list[dict]) -> list[dict]:
     bins = [
-        (0.0, 0.1, "<100ms"),
-        (0.1, 0.2, "100-200ms"),
-        (0.2, 0.3, "200-300ms"),
-        (0.3, 0.5, "300-500ms"),
-        (0.5, 0.75, "500-750ms"),
-        (0.75, 1.0, "750ms-1s"),
-        (1.0, 1.5, "1-1.5s"),
-        (1.5, 2.0, "1.5-2s"),
+        (1.0, 2.0, "1-2s"),
         (2.0, 3.0, "2-3s"),
-        (3.0, 5.0, "3-5s"),
+        (3.0, 4.0, "3-4s"),
+        (4.0, 5.0, "4-5s"),
         (5.0, 7.5, "5-7.5s"),
         (7.5, 10.0, "7.5-10s"),
-        (10.0, 15.0, "10-15s"),
+        (10.0, 12.5, "10-12.5s"),
+        (12.5, 15.0, "12.5-15s"),
         (15.0, 20.0, "15-20s"),
-        (20.0, 30.0, "20-30s"),
+        (20.0, 25.0, "20-25s"),
+        (25.0, 30.0, "25-30s"),
         (30.0, 45.0, "30-45s"),
         (45.0, 60.0, "45-60s"),
-        (60.0, 90.0, "60-90s"),
-        (90.0, 120.0, "90-120s"),
-        (120.0, float("inf"), "≥120s"),
+        (60.0, 75.0, "60-75s"),
+        (75.0, 90.0, "75-90s"),
+        (90.0, 105.0, "90-105s"),
+        (105.0, 120.0, "105-120s"),
+        (120.0, 180.0, "120-180s"),
+        (180.0, 300.0, "180-300s"),
+        (300.0, float("inf"), "≥300s"),
     ]
     out = [{"label": label, "count": 0} for _, _, label in bins]
     for rec in records:
@@ -214,7 +198,7 @@ def _latency_distribution(records: list[dict]) -> list[dict]:
 
 
 def _render_latency_distribution_svg(buckets: list[dict]) -> str:
-    width_per_bucket = 70
+    width_per_bucket = 59
     height = 140
     pad_top = 14
     pad_bot = 28
@@ -244,7 +228,7 @@ def _render_latency_distribution_svg(buckets: list[dict]) -> str:
             )
         svg.append(
             f'<text x="{x + width_per_bucket/2}" y="{height - 8}" '
-            f'fill="#8b949e" font-size="10" text-anchor="middle">{html.escape(b["label"])}</text>'
+            f'fill="#8b949e" font-size="8" text-anchor="middle">{html.escape(b["label"])}</text>'
         )
     svg.append("</svg>")
     return "".join(svg)
@@ -316,20 +300,11 @@ def render_html(root: Path, mode_label: str) -> str:
 
     lat1 = _latency_stats(recs_1h)
     lat24 = _latency_stats(recs_24h)
-    stage1 = _stage_stats(recs_1h)
-    stage24 = _stage_stats(recs_24h)
     latency_panel = f'''
         <table class="lat">
             <tr><th></th><th>p50</th><th>p95</th><th>p99</th><th>ok samples</th></tr>
             <tr><th>1h</th><td>{_fmt_lat(lat1["p50"])}</td><td>{_fmt_lat(lat1["p95"])}</td><td>{_fmt_lat(lat1["p99"])}</td><td>{lat1["count"]}</td></tr>
             <tr><th>24h</th><td>{_fmt_lat(lat24["p50"])}</td><td>{_fmt_lat(lat24["p95"])}</td><td>{_fmt_lat(lat24["p99"])}</td><td>{lat24["count"]}</td></tr>
-        </table>
-    '''
-    stage_panel = f'''
-        <table class="lat">
-            <tr><th>stage</th><th>1h mean</th><th>24h mean</th><th>24h samples</th></tr>
-            <tr><th>preview</th><td>{_fmt_lat(stage1["preview"]["mean"])}</td><td>{_fmt_lat(stage24["preview"]["mean"])}</td><td>{stage24["preview"]["count"]}</td></tr>
-            <tr><th>total</th><td>{_fmt_lat(stage1["total"]["mean"])}</td><td>{_fmt_lat(stage24["total"]["mean"])}</td><td>{stage24["total"]["count"]}</td></tr>
         </table>
     '''
 
@@ -369,7 +344,7 @@ def render_html(root: Path, mode_label: str) -> str:
 <meta charset="utf-8"/>
 <title>AgentExecTunnel availability · {html.escape(mode_label)}</title>
 <style>
- body {{ background:#0d1117; color:#c9d1d9; font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; margin:0; padding:20px; }}
+ body {{ background:#0d1117; color:#c9d1d9; font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; margin:0; padding:24px; }}
  h1,h2 {{ font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-weight:600; }}
  h1 {{ font-size:20px; margin:0 0 4px; }}
  h2 {{ font-size:14px; color:#8b949e; margin:24px 0 8px; text-transform:uppercase; letter-spacing:1px; }}
@@ -379,16 +354,16 @@ def render_html(root: Path, mode_label: str) -> str:
  .card-title {{ font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-size:13px; color:#8b949e; text-transform:uppercase; letter-spacing:1px; }}
  .card-big {{ font-size:32px; font-weight:700; margin:6px 0; }}
  .card-sub {{ font-size:12px; color:#8b949e; font-family:"SFMono-Regular",Menlo,Consolas,monospace; }}
- table {{ border-collapse:collapse; font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-size:13px; }}
+ table {{ border-collapse:collapse; font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-size:13px; min-width:720px; }}
  th,td {{ text-align:left; padding:6px 12px; border-bottom:1px solid #21262d; }}
  th {{ color:#8b949e; text-transform:uppercase; font-size:11px; letter-spacing:1px; font-weight:600; }}
  td.fail {{ color:#b71c1c; }}
  .lat th:first-child {{ color:#8b949e; }}
  .muted {{ color:#8b949e; }}
  .mono-sm {{ font-family:"SFMono-Regular",Menlo,Consolas,monospace; font-size:12px; color:#8b949e; }}
- .timeline {{ width:100%; max-width:900px; display:block; border:1px solid #30363d; border-radius:6px; }}
- .latdist {{ width:100%; max-width:760px; display:block; border:1px solid #30363d; border-radius:6px; }}
- .panel {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:14px 18px; display:inline-block; }}
+ .timeline,.latdist {{ width:100%; max-width:1220px; display:block; border:1px solid #30363d; border-radius:6px; box-sizing:border-box; }}
+ .panel {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:14px 18px; display:block; width:max-content; max-width:100%; box-sizing:border-box; }}
+ .chart-panel {{ background:#161b22; border:1px solid #30363d; border-radius:6px; padding:12px; max-width:1220px; box-sizing:border-box; overflow-x:auto; }}
 </style>
 </head><body>
 <h1>AgentExecTunnel · availability</h1>
@@ -404,14 +379,11 @@ def render_html(root: Path, mode_label: str) -> str:
 <h2>latency (ok probes)</h2>
 <div class="panel">{latency_panel}</div>
 
-<h2>stage timings · mean (ok probes)</h2>
-<div class="panel">{stage_panel}</div>
-
 <h2>heartbeat · last 24h (2h buckets)</h2>
-{timeline_svg}
+<div class="chart-panel">{timeline_svg}</div>
 
-<h2>latency distribution · last 24h (ok probes)</h2>
-{latency_distribution_svg}
+<h2>latency distribution · last 24h (ok probes, ≥1s)</h2>
+<div class="chart-panel">{latency_distribution_svg}</div>
 
 <h2>per-probe · last 24h</h2>
 <table>
@@ -445,7 +417,7 @@ def serve(root: Path, mode_label: str, host: str, port: int, snapshot: bool = Fa
     handler = lambda *args, **kwargs: http.server.SimpleHTTPRequestHandler(  # noqa: E731
         *args, directory=os.fspath(reports), **kwargs
     )
-    with socketserver.ThreadingTCPServer((host, port), handler) as httpd:
+    with _AvailabilityTCPServer((host, port), handler) as httpd:
         url = f"http://{host}:{port}/{latest.name}"
         print(url)
         print(f"[availability] serving {reports} at {url}", flush=True)

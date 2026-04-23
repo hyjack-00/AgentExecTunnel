@@ -12,6 +12,7 @@ from tests.availability import probe as availability_probe
 from tests.availability import storage
 from tests.availability.probes import PROBES, all_tags
 from tests.availability.report import (
+    _AvailabilityTCPServer,
     _latency_distribution,
     _time_buckets,
     generate,
@@ -89,6 +90,10 @@ class ProbesTests(unittest.TestCase):
 
 
 class ReportSectionsTests(unittest.TestCase):
+    def test_availability_server_enables_fast_rebind(self) -> None:
+        self.assertTrue(_AvailabilityTCPServer.allow_reuse_address)
+        self.assertTrue(_AvailabilityTCPServer.daemon_threads)
+
     def test_render_html_includes_all_legacy_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -113,16 +118,15 @@ class ReportSectionsTests(unittest.TestCase):
             self.assertIn("p95", html_text)
             self.assertIn("p99", html_text)
 
-            # stage timings
-            self.assertIn("stage timings", html_text)
-            self.assertIn("preview", html_text)
+            # stage timings removed from the compact report
+            self.assertNotIn("stage timings", html_text)
 
             # SVG timeline
             self.assertIn("<svg", html_text)
             self.assertIn('class="timeline"', html_text)
             self.assertIn("heartbeat · last 24h (2h buckets)", html_text)
             self.assertIn('class="latdist"', html_text)
-            self.assertIn("latency distribution · last 24h", html_text)
+            self.assertIn("latency distribution · last 24h (ok probes, ≥1s)", html_text)
 
             # per-probe table
             self.assertIn("per-probe", html_text)
@@ -176,9 +180,11 @@ class ReportSectionsTests(unittest.TestCase):
         ])
         by_label = {row["label"]: row["count"] for row in dist}
         self.assertEqual(len(dist), 20)
-        self.assertEqual(by_label["500-750ms"], 1)
+        self.assertNotIn("500-750ms", by_label)
+        self.assertEqual(sum(by_label.values()), 2)
         self.assertEqual(by_label["5-7.5s"], 1)
-        self.assertEqual(by_label["≥120s"], 1)
+        self.assertEqual(by_label["≥300s"], 0)
+        self.assertEqual(by_label["120-180s"], 1)
 
 
 class ProbeDriverTests(unittest.TestCase):

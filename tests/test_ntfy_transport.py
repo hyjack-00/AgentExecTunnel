@@ -12,9 +12,11 @@ from agent_exec_tunnel.ntfy_transport import (
     _attachment_maybe_json,
     _auth_header,
     _colorize_retry,
+    _publish_retry_delay_seconds,
     _record_to_envelope,
     poll_since,
     poll_loop,
+    publish,
     publish_forever,
     wait_for,
 )
@@ -64,6 +66,30 @@ class RetryLogFormattingTests(unittest.TestCase):
         self.assertIn("\033[2;33m", first)
         self.assertIn("\033[31m", fourth)
         self.assertIn("\033[1;31m", sixth)
+
+    def test_publish_retry_delay_uses_5s_steps(self) -> None:
+        self.assertEqual(_publish_retry_delay_seconds(1), 5.0)
+        self.assertEqual(_publish_retry_delay_seconds(2), 10.0)
+        self.assertEqual(_publish_retry_delay_seconds(3), 15.0)
+
+
+class PublishRetryTests(unittest.TestCase):
+    def test_publish_uses_larger_retry_delays(self) -> None:
+        cfg = NtfyConfig(publish_max_attempts=3)
+        err = urllib.error.HTTPError(
+            "https://ntfy.sh/topic",
+            429,
+            "Too Many Requests",
+            {},
+            None,
+        )
+        with mock.patch(
+            "agent_exec_tunnel.ntfy_transport.urllib.request.urlopen",
+            side_effect=[err, err, err],
+        ), mock.patch("agent_exec_tunnel.ntfy_transport.time.sleep") as sleep_mock:
+            with self.assertRaises(ntfy_transport.NtfyPublishError):
+                publish(cfg, "topic", {"task_id": "t1"})
+        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [5.0, 10.0])
 
 
 class AttachmentEnvelopeTests(unittest.TestCase):

@@ -165,7 +165,7 @@ Settings override any of these via `agent_exec_tunnel.config.Settings` or env:
 
 ## Availability
 
-`tests/availability/` records probe results into `var/availability/data-YYYYMMDD.jsonl` and renders an HTML dashboard with hop-availability cards, p50/p95/p99 latency, preview/total stage timings, a 24h heartbeat SVG in 2h buckets, a 20-bucket latency distribution chart, a per-probe table, and a recent-failures list.
+`tests/availability/` records probe results into `var/availability/data-YYYYMMDD.jsonl` and renders an HTML dashboard with hop-availability cards, p50/p95/p99 latency, a 24h heartbeat SVG in 2h buckets, a 20-bucket latency distribution chart starting at 1s, a per-probe table, and a recent-failures list.
 
 ```bash
 python3 tests/availability/probe.py --mode remote_relay --mean-period 300

@@ -35,6 +35,7 @@ Note: the terminal "preview" output below is **for humans**. The actual command 
 The `_ssh` variants are **convenience wrappers**. You can always reproduce their effect with `submit.py` plus manual quoting — they just save you from counting shell layers yourself.
 
 1. Run exactly one of the following forms from the repo root. Keep the payload as one whole outer shell string. Do not let bash split the command body into multiple argv pieces.
+
 ```bash
 # Bottom of stack — raw, no rendering:
 python3 submitter/submit.py '<any shell command>'

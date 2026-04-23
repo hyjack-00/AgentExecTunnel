@@ -158,6 +158,17 @@ def _retry_after_seconds(exc: BaseException, default: float) -> float:
         return default
 
 
+def _publish_retry_delay_seconds(attempt: int) -> float:
+    """Bounded publish backoff for submitter-side POST retries.
+
+    We intentionally keep this much larger than poll backoff so repeated
+    submits do not re-hit the same server-side refill window immediately.
+    Attempt numbers are 1-based and refer to the failed attempt that just
+    happened; the returned value is how long to wait before the next retry.
+    """
+    return 5.0 * max(1, attempt)
+
+
 def _publish_once(cfg: NtfyConfig, topic: str, body: bytes) -> None:
     """Single POST attempt. Each call builds a fresh Request so no stateful
     opener / connection pool leaks across retries — a retry after a long
@@ -194,7 +205,7 @@ def publish(cfg: NtfyConfig, topic: str, envelope: dict) -> None:
             last_err = exc
             if attempt >= cfg.publish_max_attempts:
                 break
-            time.sleep(_retry_after_seconds(exc, min(0.5 * (2 ** (attempt - 1)), 4.0)))
+            time.sleep(_retry_after_seconds(exc, _publish_retry_delay_seconds(attempt)))
     raise NtfyPublishError(
         f"ntfy publish failed topic={topic} attempts={cfg.publish_max_attempts} error={last_err}"
     )
